@@ -1,0 +1,58 @@
+[
+  {
+    "title": "OpenAI lanza GPT-5 con capacidades de razonamiento extendido y acceso a herramientas en tiempo real",
+    "summary": "OpenAI presentó GPT-5, su modelo de lenguaje más avanzado hasta la fecha, con mejoras significativas en razonamiento multi-paso y capacidad de conectarse a herramientas externas en tiempo real. Según la empresa, el modelo supera a su predecesor en un 40% en benchmarks de razonamiento matemático y reduce las alucinaciones en un 60%. El modelo ya está disponible para desarrolladores a través de la API y se espera su integración en ChatGPT en las próximas semanas.",
+    "url": "https://openai.com/blog/gpt-5",
+    "source": "TechCrunch",
+    "published_at": "2026-03-24T14:30:00Z",
+    "tags": ["ia", "machine learning", "tecnología", "OpenAI", "innovación"]
+  },
+  {
+    "title": "Argentina lanza fondo de $500 millones para startups deeptech en biotecnología y energía limpia",
+    "summary": "El Ministerio de Ciencia y Tecnología anunció la creación de un fondo de inversión de $500 millones de dólares destinado a startups argentinas enfocadas en deeptech, particularmente en biotecnología y energía renovable. El programa, que se implementará durante 2026 y 2027, contempla coinversión público-privada y busca generar al menos 50 nuevas empresas de base tecnológica con potencial exportador. Las empresas seleccionadas recibirán entre $2 y $20 millones según su etapa de desarrollo.",
+    "url": "https://www.cronista.com/tecnologia/argentina-fondo-startups-deeptech",
+    "source": "Cronista",
+    "published_at": "2026-03-23T09:00:00Z",
+    "tags": ["startup", "emprendimiento", "tecnología", "economía", "innovación"]
+  },
+  {
+    "title": "Estudio de Harvard revela que el 73% de los equipos de alto rendimiento priorizan la autonomía sobre el control",
+    "summary": "Una investigación de Harvard Business Review que analizó 1.200 equipos en 30 países durante tres años encontró que el 73% de los equipos más productivos operan con altos niveles de autonomía y responsabilidad distribuida. El estudio indica que los líderes que adoptan un estilo de gestión orientado a resultados en lugar de microgestión logran equipos hasta 2.3 veces más comprometidos. Los autores destacan que la confianza explícita es el predictor más fuerte de retención de talento en equipos técnicos.",
+    "url": "https://hbr.org/2026/03/high-performance-teams-autonomy",
+    "source": "Harvard Business Review",
+    "published_at": "2026-03-22T11:00:00Z",
+    "tags": ["liderazgo", "management", "talento", "negocios"]
+  },
+  {
+    "title": "Mercado libre expande su plataforma de pagos a Colombia y Chile con nuevas funcionalidades B2B",
+    "summary": "Mercado Libre anunció la expansión de Mercado Pago a Colombia y Chile con un conjunto de herramientas especialmente diseñadas para el segmento B2B, incluyendo facturación automatizada, gestión de crédito empresarial y conciliación bancaria en tiempo real. La compañía proyecta incorporar 150.000 nuevas empresas en ambos países durante el primer año. La expansión responde al crecimiento del comercio digital en la región, que según datos de la empresa creció un 34% en 2025.",
+    "url": "https://www.infobae.com/economia/2026/03/21/mercado-pago-expansion-colombia-chile",
+    "source": "Infobae Tecnología",
+    "published_at": "2026-03-21T16:00:00Z",
+    "tags": ["fintech", "negocios", "tecnología", "economía"]
+  },
+  {
+    "title": "Nuevo framework de React 19 promete eliminar el 80% del código boilerplate en aplicaciones empresariales",
+    "summary": "El equipo de Meta publicó la versión estable de React 19 con una serie de mejoras centradas en productividad del desarrollador. Entre las novedades más destacadas se encuentran los Server Components estables, el nuevo compilador de React que optimiza automáticamente el rendimiento y los Actions para simplificar mutaciones de datos. Según los benchmarks publicados, las aplicaciones migradas a React 19 muestran una reducción de hasta un 80% en código repetitivo y mejoras del 30% en tiempo de carga inicial.",
+    "url": "https://react.dev/blog/2026/03/react-19",
+    "source": "React Blog",
+    "published_at": "2026-03-20T10:00:00Z",
+    "tags": ["tecnología", "desarrollo", "javascript", "innovación"]
+  },
+  {
+    "title": "El mercado de cloud computing alcanza $1.2 trillones globales y América Latina lidera el crecimiento regional",
+    "summary": "Gartner publicó su informe anual de cloud computing donde proyecta que el mercado global alcanzará $1.2 trillones de dólares en 2026. América Latina emerge como la región de mayor crecimiento con un 41% interanual, impulsada principalmente por Brasil, México y Colombia. El informe destaca que el 67% de las empresas latinoamericanas planean migrar al menos el 50% de su infraestructura a la nube en los próximos 18 meses.",
+    "url": "https://www.gartner.com/en/cloud-computing-report-2026",
+    "source": "Gartner",
+    "published_at": "2026-03-19T08:00:00Z",
+    "tags": ["cloud", "tecnología", "negocios", "data"]
+  },
+  {
+    "title": "Tips para mejorar tu rutina matutina",
+    "summary": "Algunos consejos generales.",
+    "url": "https://example.com/tips",
+    "source": "Blog personal",
+    "published_at": "2026-03-15T08:00:00Z",
+    "tags": ["lifestyle"]
+  }
+]
