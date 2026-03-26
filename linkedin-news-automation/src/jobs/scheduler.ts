@@ -5,10 +5,10 @@ import { config } from "../config";
 import { logger } from "../config/logger";
 
 /**
- * Inicia el scheduler que ejecuta el job de publicación
- * según la expresión cron configurada en CRON_SCHEDULE.
+ * Inicia el scheduler que ejecuta el job de publicación según CRON_SCHEDULE.
  *
- * Default: 0 9 * * *  →  todos los días a las 9:00 AM
+ * El lock en DB garantiza que dos instancias del scheduler (ej. dos cron processes
+ * solapados) no publiquen simultáneamente el mismo contenido.
  */
 function startScheduler(): void {
   const schedule = config.cronSchedule;
@@ -18,10 +18,16 @@ function startScheduler(): void {
     process.exit(1);
   }
 
-  logger.info("Scheduler iniciado", { schedule });
+  logger.info("Scheduler iniciado", {
+    schedule,
+    dryRun: config.dryRun,
+    approvalRequired: config.approvalRequired,
+    threshold: config.scoreThreshold,
+    maxPostsPerRun: config.maxPostsPerRun,
+  });
 
   cron.schedule(schedule, async () => {
-    logger.info("Ejecutando job programado...");
+    logger.info("Ejecutando job programado...", { schedule });
     try {
       const result = await runPublishJob();
       logger.info("Job programado completado", result);
@@ -30,17 +36,8 @@ function startScheduler(): void {
     }
   });
 
-  // También ejecutar una vez al inicio para verificar que todo funciona
-  logger.info("Ejecutando primera corrida inmediata para verificación...");
-  runPublishJob()
-    .then((result) => {
-      logger.info("Primera corrida completada", result);
-    })
-    .catch((err) => {
-      logger.error("Error en primera corrida", { error: String(err) });
-    });
-
-  // Manejo limpio de señales
+  // Manejo limpio de señales — no ejecutar al inicio (a diferencia de la v1)
+  // para evitar doble publicación al reiniciar el proceso
   process.on("SIGTERM", () => {
     logger.info("SIGTERM recibido, cerrando scheduler...");
     process.exit(0);
