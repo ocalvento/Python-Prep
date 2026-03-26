@@ -67,7 +67,7 @@ export interface IngestedNewsItem extends NewsItem {
 // ─── Funciones públicas ───────────────────────────────────────────────────────
 
 export function readNewsFile(filePath?: string): IngestedNewsItem[] {
-  const targetPath = filePath ?? config.newsInputPath;
+  const targetPath = filePath ?? (config as Record<string, unknown>).newsInputPath as string ?? "./inputs/news.json";
 
   if (!fs.existsSync(targetPath)) {
     throw new Error(`Archivo de noticias no encontrado: ${targetPath}`);

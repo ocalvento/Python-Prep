@@ -1,451 +1,412 @@
-# LinkedIn News Automation
+# LinkedIn News Automation — BOIA Integration
 
-Sistema de publicación automatizada en LinkedIn. Lee noticias desde un archivo JSON, evalúa su relevancia, genera posts profesionales en español y los publica vía la API oficial de LinkedIn con garantías de seguridad, deduplicación y control editorial.
+Sistema de publicación automatizada en LinkedIn para contenido regulatorio argentino. Consume candidatos del sistema **BOIA** (Base de Observación de Impacto Administrativo), los evalúa con un scoring editorial específico para LinkedIn, genera posts en español orientados a impacto práctico, y los publica vía la API oficial de LinkedIn.
+
+BOIA es la fuente de verdad regulatoria. Este sistema actúa como segunda capa editorial.
 
 ---
 
 ## Arquitectura
 
 ```
-inputs/news.json
-    │
-    ▼
-┌──────────────────────────────────────────────────────────┐
-│  ingest — Lee, valida (Zod), normaliza, deduplica         │
-│  · Normaliza title/source/tags a lowercase                │
-│  · Elimina tracking params de URLs (utm_*, fbclid, etc.) │
-│  · Soporta canonical_url para dedup canónica              │
-│  · Rechaza fechas futuras o más viejas de N días          │
-└────────────────────────────┬─────────────────────────────┘
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  scoring — Score 0-100 con 5 señales configurables        │
-│  · Recencia (decaimiento exponencial, half-life 48h)      │
-│  · Tags (retornos decrecientes, high/medium value)        │
-│  · Credibilidad de fuente (20 fuentes verificadas)        │
-│  · Longitud del resumen                                   │
-│  · Bonus (datos %, montos, citas de estudios)             │
-│  · Penalización (frases genéricas, título corto, sin tags)│
-└────────────────────────────┬─────────────────────────────┘
-                             │ score < SCORE_THRESHOLD → SKIP
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  copy — Genera texto en español profesional               │
-│  · Extrae datos numéricos y los destaca                   │
-│  · Reflexión contextual con múltiples variantes por tema  │
-│  · Detecta overlap de bigramas con posts recientes        │
-│  · Valida calidad mínima (quality score ≥ 40)             │
-│  · Devuelve { ok: false } si el copy es débil             │
-└────────────────────────────┬─────────────────────────────┘
-                             │ copy débil → SKIP
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  db — isAlreadyProcessed() — SHA-256(title+url)           │
-└────────────────────────────┬─────────────────────────────┘
-                             │ duplicado → SKIP
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  linkedin/client — POST /rest/posts                       │
-│  · Errores tipados: auth / scope / rate_limit / validation│
-│  · Refresh token automático si 401 (una sola vez)         │
-│  · No reintenta en 400/403/422                            │
-│  · axios-retry en 429/5xx con backoff exponencial         │
-└────────────────────────────┬─────────────────────────────┘
-                             ▼
-┌──────────────────────────────────────────────────────────┐
-│  db — savePost() con: URN, post_id, score_breakdown,      │
-│  copy_text, failure_reason, published_at_real             │
-└──────────────────────────────────────────────────────────┘
-
-auth/tokenManager ──▶ SQLite (tokens) ◀── scripts/getToken.ts
-jobs/publish.ts   ──▶ lock DB ──▶ pipeline completo
-jobs/dryRun.ts    ──▶ simulación solo-lectura (sin escribir en DB)
-```
-
-### Módulos
-
-| Módulo | Responsabilidad |
-|---|---|
-| `src/config` | Variables de entorno validadas con Zod + logger |
-| `src/ingest` | Leer, validar, normalizar y deduplicar news.json |
-| `src/scoring` | Score 0-100 con pesos configurables + penalidades |
-| `src/copy` | Generar texto profesional con validación de calidad y overlap |
-| `src/linkedin` | Cliente HTTP con errores tipados y refresh de token |
-| `src/auth` | OAuth 2.0: exchange code, refresh token |
-| `src/db` | SQLite con migraciones, dedup, lock de concurrencia |
-| `src/jobs` | Orquestación: publish (con lock), dryRun, scheduler |
-| `scripts` | Flujo OAuth interactivo para obtener tokens |
-
----
-
-## Requisitos previos
-
-- Node.js >= 18
-- npm >= 9
-- Una **LinkedIn Developer App** con el producto **Share on LinkedIn** activo
-
----
-
-## 1. Crear app en LinkedIn Developer Portal
-
-1. Ir a [LinkedIn Developer Portal](https://www.linkedin.com/developers/apps) → **Create App**
-2. En la pestaña **Products**, solicitar **Share on LinkedIn** (habilita `w_member_social`)
-3. En **Auth** → **OAuth 2.0 settings**, agregar la URL de redirección:
-   ```
-   http://localhost:3000/callback
-   ```
-4. Copiar el **Client ID** y el **Client Secret**
-
-> **Scopes necesarios:** `openid profile w_member_social`
-
----
-
-## 2. Instalación
-
-```bash
-# Clonar / navegar al directorio
-cd linkedin-news-automation
-
-# Instalar dependencias
-npm install
-
-# Copiar configuración
-cp .env.example .env
-# Editar .env con tus credenciales
+BOIA (fuente)
+  │  Opción A: boia_candidates.json (default)
+  │  Opción B: API REST interna de BOIA
+  │  Opción C: SQLite de BOIA (mismo servidor)
+  ▼
+┌──────────────────────────────────────────────────────────────┐
+│  ingest — Lee, valida (Zod), normaliza                        │
+│  · BoiaCandidate: id, title, summary, organism, category      │
+│  · Campos: boiaRelevanceScore, whyItMatters, affectedAudience │
+│  · Normaliza URLs (strip utm_*, fbclid, gclid, etc.)          │
+│  · Calcula contentHash = SHA-256("boia::" + id + "::" + url)  │
+│  · Rechaza fechas futuras, deduplica por id dentro del batch  │
+└──────────────────────────────────────────────────────────────┘
+                              │ Filtro 1: boiaRelevanceScore < BOIA_MIN_RELEVANCE → SKIP
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  scoring/editorialScorer — LinkedIn Publish Score (0-100)     │
+│  · organismRelevance  (0-25): BCRA/CNV/UIF/SEC/FED = 25 pts   │
+│  · audienceImpact     (0-25): overlap con audiencia fintech   │
+│  · messageClarity     (0-15): calidad del whyItMatters        │
+│  · recency            (0-15): decaimiento exponencial 52h     │
+│  · conversationPotential(0-10): tags de alto engagement       │
+│  · dataBonus          (0-10): %, fechas, linkedinAngle        │
+│  · technicalityPenalty(0-15): muy técnico = penaliza          │
+└──────────────────────────────────────────────────────────────┘
+                              │ Filtro 2: linkedinPublishScore < LINKEDIN_MIN_SCORE → SKIP
+                              │ Filtro 3: contentHash ya en DB → SKIP (deduplicación)
+                              │ Filtro 4: mismo organismo en esta corrida → SKIP
+                              │   (excepto si linkedinPublishScore >= LINKEDIN_EXCEPTIONAL_SCORE)
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  copy/generator — Post regulatorio en español                 │
+│  · Hook basado en tipo de acción (plazo/sanción/requisito)    │
+│  · Cuerpo desde linkedinAngle (si existe) o whyItMatters      │
+│  · Traduce lenguaje normativo a impacto de negocio            │
+│  · No copia el summary verbatim. No inventa efectos legales   │
+│  · Línea de audiencia: "Aplica especialmente a: fintechs..."  │
+│  · CTA rotativo que invita al debate                          │
+│  · Hashtags limpios (sin acentos, sin espacios)               │
+│  · Valida: largo mínimo, quality score ≥ 40, overlap Jaccard  │
+└──────────────────────────────────────────────────────────────┘
+                              │ copy débil → SKIP
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  linkedin/client — POST /rest/posts                           │
+│  · Errores tipados: auth / scope / rate_limit / validation    │
+│  · Refresh token automático si 401 (una sola vez)             │
+│  · No reintenta 400/403/422. Sí reintenta 429/5xx            │
+│  · Token maskeado en logs                                     │
+└──────────────────────────────────────────────────────────────┘
+                              ▼
+┌──────────────────────────────────────────────────────────────┐
+│  db — SQLite (better-sqlite3, WAL mode)                       │
+│  · Guarda resultado de cada candidato procesado               │
+│  · Schema versionado por PRAGMA user_version                  │
+│  · Columns: boia_candidate_id, organism, category, breakdown  │
+│  · Lock de concurrencia (tabla locks, PID + timestamp)        │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## 3. Configuración (`.env`)
-
-```env
-LINKEDIN_CLIENT_ID=tu_client_id
-LINKEDIN_CLIENT_SECRET=tu_client_secret
-LINKEDIN_REDIRECT_URI=http://localhost:3000/callback
-SCORE_THRESHOLD=75
-MAX_POSTS_PER_RUN=3
-DRY_RUN=false
-APPROVAL_REQUIRED=false
-```
-
-Ver `.env.example` para la lista completa de variables.
-
----
-
-## 4. Autenticación inicial (OAuth 2.0 — una sola vez)
-
-```bash
-npm run get-token
-```
-
-El script:
-1. Muestra una URL de autorización de LinkedIn en la terminal
-2. Abrís la URL en el navegador y autorizás la app
-3. Captura el `authorization_code` en el redirect a `localhost:3000/callback`
-4. Intercambia el code por `access_token` + `refresh_token`
-5. Guarda los tokens en SQLite (se refrescan automáticamente)
-
-**Output esperado:**
-```
-  Abrí la siguiente URL en tu navegador:
-  https://www.linkedin.com/oauth/v2/authorization?...
-
-  TOKENS OBTENIDOS EXITOSAMENTE
-  Scope    : openid profile w_member_social
-  Expira en: 60 días
-  Refresh  : Sí
-```
-
----
-
-## 5. Agregar noticias (`inputs/news.json`)
-
-```json
-[
-  {
-    "title": "Título de la noticia (mín. 10 chars)",
-    "summary": "Resumen descriptivo con al menos 50 caracteres y contexto suficiente.",
-    "url": "https://fuente.com/articulo",
-    "canonical_url": "https://fuente.com/articulo-canonico",
-    "source": "Nombre de la fuente",
-    "published_at": "2026-03-24T14:30:00Z",
-    "tags": ["ia", "tecnología", "innovación"]
-  }
-]
-```
-
-### Validaciones aplicadas en ingest
-
-| Campo | Regla |
-|---|---|
-| `title` | 10-300 chars |
-| `summary` | 50-5000 chars |
-| `url` | URL válida |
-| `canonical_url` | URL válida (opcional) |
-| `source` | 2-100 chars |
-| `published_at` | ISO 8601, no futuro, no más viejo que `MAX_NEWS_AGE_DAYS` |
-| `tags` | 1-20 tags, máx. 50 chars c/u |
-
----
-
-## 6. Comandos
-
-### Dry-run (siempre primero)
-
-Simula el pipeline sin publicar ni escribir en DB. Muestra scores, copy generado y razones de skip.
-
-```bash
-npm run dry-run
-```
-
-### Publicar ahora
-
-```bash
-npm run publish-now
-```
-
-### Modo de aprobación manual
-
-```bash
-# Generar posts y guardarlos como "pending_approval" (no publica)
-APPROVAL_REQUIRED=true npm run publish-now
-
-# Ver posts pendientes y publicar los aprobados
-npm run publish-approved
-```
-
-### Scheduler (cron)
-
-```bash
-npm run schedule
-```
-
-Ejecuta según `CRON_SCHEDULE` (default: `0 9 * * *` → 9 AM todos los días).
-
-### Tests
-
-```bash
-npm test                    # correr todos los tests
-npm test -- --coverage      # con cobertura
-npm test scoring            # solo el suite de scoring
-npm test -- --verbose       # output detallado
-```
-
----
-
-## 7. Sistema de scoring
-
-| Señal | Peso default | Descripción |
-|---|---|---|
-| `SCORE_WEIGHT_RECENCY` | 30 | Decaimiento exponencial. Half-life: 48h. Hoy = 30 pts, 1 semana ≈ 5 pts |
-| `SCORE_WEIGHT_TAGS` | 30 | Retornos decrecientes. Tags de alto valor = 10 pts c/u (primer tag) |
-| `SCORE_WEIGHT_SOURCE` | 20 | Fuentes verificadas (HBR, TechCrunch, Wired...) = 20 pts |
-| `SCORE_WEIGHT_LENGTH` | 10 | Lineal hasta 80 palabras = 10 pts |
-| `SCORE_WEIGHT_BONUS` | 5 | Datos numéricos (%), montos, citas de estudios |
-| `SCORE_PENALTY_MAX_POINTS` | -15 | Penalización por frases genéricas, título corto, sin tags relevantes |
-
-**Tags de alto valor** (configurados en `scorer.ts`):
-`ia`, `machine learning`, `startup`, `fintech`, `cloud`, `liderazgo`, `product`, `innovación`, `growth`, y más.
-
-**Publicación**: solo si `score >= SCORE_THRESHOLD` (default: 75).
-
----
-
-## 8. Generación de copy
-
-### Estructura del post
-
-```
-[Título]
-
-[Dato numérico destacado (si existe).] [Resumen truncado a 220 chars]
-
-[Reflexión contextual según tags — elegida con menor overlap con posts recientes]
-
-[CTA rotativo determinista]
-
-#hashtag1 #hashtag2 #hashtag3 #hashtag4
-```
-
-### Validación de calidad
-
-El post es **rechazado** (`{ ok: false }`) si:
-- Tiene menos de `COPY_MIN_CHARS` caracteres (default: 200)
-- El quality score es < 40/100
-- El overlap de bigramas con cualquier post reciente supera `COPY_PHRASE_OVERLAP_THRESHOLD` (default: 55%)
-
----
-
-## 9. Manejo de errores de LinkedIn API
-
-| HTTP | Clasificación | Comportamiento |
-|---|---|---|
-| 401 | `auth_error` | Refresh token → reintento único |
-| 403 | `scope_error` | Falla inmediata — no hay retry |
-| 400/422 | `validation_error` | Falla inmediata — payload inválido |
-| 429 | `rate_limit` | axios-retry con backoff exponencial (max 3 intentos) |
-| 5xx | `network_error` | axios-retry con backoff exponencial (max 3 intentos) |
-
-Ante `auth_error` o `scope_error`, el job aborta los posts restantes de esa corrida.
-
----
-
-## 10. Base de datos SQLite
-
-Archivo: `./data/linkedin_automation.db`
-
-### Tabla `posts`
-
-```sql
-CREATE TABLE posts (
-  id                INTEGER PRIMARY KEY AUTOINCREMENT,
-  content_hash      TEXT    NOT NULL UNIQUE,   -- SHA-256(title_norm + url_norm)
-  title             TEXT    NOT NULL,
-  source_url        TEXT    NOT NULL,          -- URL normalizada
-  score             INTEGER NOT NULL,
-  status            TEXT    NOT NULL,          -- published|skipped|failed|dry_run|pending_approval
-  linkedin_urn      TEXT,                      -- urn:li:share:123456789
-  linkedin_post_id  TEXT,                      -- 123456789 (extraído del URN)
-  post_text         TEXT,                      -- texto del post (compatibilidad)
-  copy_text         TEXT,                      -- texto del post generado
-  copy_quality_score INTEGER,                  -- quality score 0-100
-  error_message     TEXT,
-  failure_reason    TEXT,                      -- auth_error|scope_error|rate_limit|...
-  score_breakdown   TEXT,                      -- JSON con breakdown por señal
-  created_at        DATETIME DEFAULT (datetime('now')),
-  published_at      DATETIME,                  -- cuando se marcó como published
-  published_at_real DATETIME                   -- timestamp real de publicación
-);
-```
-
-### Tabla `locks`
-
-```sql
-CREATE TABLE locks (
-  id         INTEGER PRIMARY KEY AUTOINCREMENT,
-  name       TEXT    NOT NULL UNIQUE,   -- 'publish_job'
-  pid        INTEGER NOT NULL,          -- PID del proceso
-  started_at DATETIME DEFAULT (datetime('now'))
-);
-```
-
----
-
-## 11. Lock de concurrencia
-
-El job usa un lock DB-based para evitar doble publicación:
-
-1. Al iniciar: intenta insertar en `locks` → si ya existe un lock reciente, aborta
-2. Locks más viejos que `LOCK_MAX_AGE_MINUTES` (default: 30 min) se consideran stale y se eliminan automáticamente
-3. Al finalizar (éxito o error): elimina el lock del proceso actual
-
----
-
-## 12. Variables de entorno — referencia completa
-
-| Variable | Default | Descripción |
-|---|---|---|
-| `LINKEDIN_CLIENT_ID` | — | **Requerido.** Client ID de la app |
-| `LINKEDIN_CLIENT_SECRET` | — | **Requerido.** Client Secret de la app |
-| `LINKEDIN_REDIRECT_URI` | `http://localhost:3000/callback` | URL de redirección OAuth |
-| `LINKEDIN_ACCESS_TOKEN` | — | Token manual (override para CI/CD) |
-| `LINKEDIN_REFRESH_TOKEN` | — | Refresh token manual |
-| `SCORE_THRESHOLD` | `75` | Score mínimo para publicar |
-| `APPROVAL_REQUIRED` | `false` | Si true, guarda como pending en lugar de publicar |
-| `DRY_RUN` | `false` | Si true, simula sin publicar (no escribe en DB) |
-| `MAX_POSTS_PER_RUN` | `3` | Límite de publicaciones por corrida |
-| `MAX_NEWS_AGE_DAYS` | `30` | Ignorar noticias más antiguas |
-| `SCORE_WEIGHT_RECENCY` | `30` | Peso de la señal de recencia |
-| `SCORE_WEIGHT_TAGS` | `30` | Peso de los tags |
-| `SCORE_WEIGHT_SOURCE` | `20` | Peso de la credibilidad de fuente |
-| `SCORE_WEIGHT_LENGTH` | `10` | Peso de la longitud del resumen |
-| `SCORE_WEIGHT_BONUS` | `5` | Peso del bonus por datos concretos |
-| `SCORE_PENALTY_MAX_POINTS` | `15` | Máximo de puntos de penalización |
-| `MAX_POST_CHARS` | `3000` | Límite de caracteres del post |
-| `MAX_HASHTAGS` | `4` | Máximo de hashtags |
-| `COPY_MIN_CHARS` | `200` | Mínimo de chars para aceptar el copy |
-| `COPY_PHRASE_OVERLAP_THRESHOLD` | `0.55` | Coeficiente de Jaccard máximo con posts recientes |
-| `RECENT_POSTS_TO_CHECK` | `10` | Cuántos posts recientes revisar para overlap |
-| `DB_PATH` | `./data/linkedin_automation.db` | Ruta a la base de datos |
-| `LOCK_MAX_AGE_MINUTES` | `30` | Minutos antes de considerar un lock como stale |
-| `CRON_SCHEDULE` | `0 9 * * *` | Expresión cron del scheduler |
-| `LOG_LEVEL` | `info` | Nivel de logs (error/warn/info/debug) |
-| `LOG_DIR` | `./logs` | Directorio de logs |
-
----
-
-## 13. Solución de problemas
-
-### "No hay access token disponible"
-```bash
-npm run get-token
-```
-
-### Error 401 al publicar
-El token venció y no hay refresh token. Re-autenticarse:
-```bash
-npm run get-token
-```
-
-### Error 403 al publicar
-```
-scope_error: Permisos insuficientes (403). Verificá que la app tenga w_member_social activo.
-```
-→ Ir al Developer Portal → Products → verificar que **Share on LinkedIn** está aprobado.
-
-### Error 400/422 al publicar
-```
-validation_error: Payload inválido
-```
-→ El texto del post puede tener caracteres no permitidos o superar límites de LinkedIn. Revisar `copy_text` en la DB.
-
-### "Lock de ejecución activo"
-```
-Lock de ejecución activo, abortando. pid=1234, ageMinutes=5
-```
-→ Hay otro proceso corriendo. Si no es el caso (proceso caído), borrar manualmente:
-```sql
-DELETE FROM locks WHERE name = 'publish_job';
-```
-
-### Score siempre bajo el umbral
-→ Verificar que los `tags` en `news.json` coincidan con `HIGH_VALUE_TAGS` en `scorer.ts`. Los tags se normalizan a lowercase — `"IA"` y `"ia"` se tratan igual.
-
-### Copy rechazado por overlap
-→ Los posts recientes tienen frases similares. Ajustar `COPY_PHRASE_OVERLAP_THRESHOLD` o esperar hasta que roten los posts de referencia.
-
----
-
-## 14. Estructura del proyecto
+## Estructura del proyecto
 
 ```
 linkedin-news-automation/
 ├── src/
-│   ├── auth/tokenManager.ts        # OAuth 2.0
-│   ├── linkedin/client.ts          # HTTP client + errores tipados
-│   ├── ingest/newsReader.ts        # Ingest + normalización + dedup
-│   ├── scoring/scorer.ts           # Score con pesos configurables
-│   ├── copy/generator.ts           # Copy con validación de calidad
-│   ├── db/index.ts                 # SQLite + migraciones + lock
-│   ├── jobs/
-│   │   ├── publish.ts              # Pipeline con lock + rate limiting
-│   │   ├── dryRun.ts               # Simulación solo-lectura
-│   │   └── scheduler.ts            # Cron job
-│   └── config/
-│       ├── index.ts                # Variables de entorno validadas
-│       └── logger.ts               # Winston
-├── inputs/news.json
-├── scripts/getToken.ts             # OAuth interactivo
+│   ├── config/
+│   │   ├── index.ts          # Config Zod-validada desde .env
+│   │   └── logger.ts         # Winston logger (console + file)
+│   ├── ingest/
+│   │   ├── types.ts          # BoiaCandidate + BoidaCandidateSchema
+│   │   ├── normalizeUrl.ts   # Strip tracking params
+│   │   ├── boiaJsonAdapter.ts # Fuente: archivo JSON
+│   │   ├── boiaApiAdapter.ts  # Fuente: API REST de BOIA
+│   │   ├── boiaDbAdapter.ts   # Fuente: SQLite de BOIA (readonly)
+│   │   └── index.ts          # Factory: fetchBoidaCandidates()
+│   ├── scoring/
+│   │   └── editorialScorer.ts # LinkedIn Publish Score para candidatos BOIA
+│   ├── copy/
+│   │   └── generator.ts      # Generador de posts regulatorios
+│   ├── linkedin/
+│   │   └── client.ts         # API client + LinkedInApiError
+│   ├── db/
+│   │   └── index.ts          # SQLite + migraciones + lock
+│   ├── auth/
+│   │   └── tokenManager.ts   # OAuth 2.0 + refresh tokens
+│   └── jobs/
+│       ├── publish.ts        # Job principal de publicación
+│       ├── dryRun.ts         # Simulación read-only
+│       └── scheduler.ts      # node-cron scheduler
 ├── tests/
-│   ├── scoring.test.ts
-│   ├── ingest.test.ts
-│   ├── copy.test.ts
-│   ├── db.test.ts                  # Dedup + lock + migraciones
-│   ├── linkedin.test.ts            # Errores tipados + refresh único
-│   └── pipeline.test.ts            # E2E dry-run
-├── data/                           # Generado: linkedin_automation.db
-├── logs/                           # Generado: combined.log, error.log
+│   ├── editorialScorer.test.ts  # Scoring editorial para BOIA
+│   ├── boiaAdapters.test.ts     # JSON / API / DB adapters
+│   ├── copy.test.ts             # Generador de copy
+│   ├── pipeline.test.ts         # E2E dry-run con fixture BOIA
+│   ├── db.test.ts               # SQLite, dedup, lock
+│   ├── linkedin.test.ts         # Client, errores tipados
+│   ├── ingest.test.ts           # newsReader (legacy)
+│   └── scoring.test.ts          # scorer (legacy)
+├── inputs/
+│   └── boia_candidates.json     # Ejemplo de payload BOIA
+├── scripts/
+│   └── getToken.ts              # OAuth flow helper
 ├── .env.example
 ├── package.json
-└── README.md
+└── tsconfig.json
 ```
+
+---
+
+## Requisitos
+
+- Node.js 18+
+- npm 9+
+- SQLite (incluido vía `better-sqlite3`)
+
+---
+
+## Instalación
+
+```bash
+cd linkedin-news-automation
+npm install
+cp .env.example .env
+# Editar .env con tus credenciales y configuración
+```
+
+---
+
+## Configuración
+
+### Variables obligatorias
+
+```bash
+# LinkedIn OAuth
+LINKEDIN_CLIENT_ID=your_client_id
+LINKEDIN_CLIENT_SECRET=your_client_secret
+LINKEDIN_REDIRECT_URI=http://localhost:3000/callback
+LINKEDIN_ACCESS_TOKEN=   # completar después de npm run get-token
+```
+
+### Variables de BOIA
+
+```bash
+# Tipo de fuente: json | api | db
+BOIA_SOURCE=json
+
+# Opción A — archivo JSON (default, MVP)
+BOIA_JSON_PATH=./inputs/boia_candidates.json
+
+# Opción B — API REST interna de BOIA
+# BOIA_API_URL=http://localhost:4000
+# BOIA_API_KEY=your_boia_api_key
+
+# Opción C — SQLite de BOIA (mismo servidor)
+# BOIA_DB_PATH=../boia/data/boia.db
+# BOIA_DB_TABLE=candidates
+```
+
+### Filtros de publicación (doble capa)
+
+```bash
+# Filtro 1: Score mínimo de BOIA (fuente de verdad regulatoria)
+BOIA_MIN_RELEVANCE=70
+
+# Filtro 2: Score editorial mínimo para LinkedIn
+LINKEDIN_MIN_SCORE=60
+
+# Throttle por organismo (1 post por organismo por corrida)
+LINKEDIN_SAME_ORGANISM_MAX=1
+# Excepción: si el score es excepcional, permite un segundo post del mismo organismo
+LINKEDIN_EXCEPTIONAL_SCORE=90
+
+# Scoring
+SCORE_PENALTY_MAX_POINTS=15
+```
+
+### Control operativo
+
+```bash
+DRY_RUN=false          # true: simula sin publicar
+APPROVAL_REQUIRED=false # true: guarda como pending_approval para revisión manual
+MAX_POSTS_PER_RUN=3    # rate limiting defensivo
+MAX_NEWS_AGE_DAYS=30
+```
+
+---
+
+## Payload de BOIA
+
+Formato esperado del JSON (o devuelto por el API):
+
+```json
+[
+  {
+    "id": "boia-2026-03-001",
+    "title": "BCRA establece nuevos requisitos de liquidez para PSP",
+    "summary": "El Banco Central publicó la Comunicación A 8123 ...",
+    "source_url": "https://www.bcra.gob.ar/comytexord/A8123.pdf",
+    "published_at": "2026-03-24T10:00:00Z",
+    "organism": "BCRA",
+    "category": "regulacion_financiera",
+    "tags": ["psp", "liquidez", "encajes", "regulacion", "fintech"],
+    "boia_relevance_score": 92,
+    "why_it_matters": "Los 180+ PSP habilitados deberán revisar su estructura...",
+    "affected_audience": ["fintechs", "psp", "compliance", "bancos"],
+    "linkedin_angle": "Las reglas de liquidez para PSP se endurecen: el BCRA exige..."
+  }
+]
+```
+
+**Campos obligatorios:** `id`, `title` (≥10 chars), `summary` (≥50 chars), `source_url` (URL válida), `published_at` (ISO 8601, no futura), `organism`, `category`, `boia_relevance_score` (0-100), `why_it_matters` (≥20 chars).
+
+**Campos opcionales:** `tags`, `affected_audience`, `linkedin_angle` (si BOIA provee un ángulo editorial, se usa como base del cuerpo del post).
+
+---
+
+## Comandos
+
+```bash
+# Obtener tokens OAuth (flujo interactivo, hacer una sola vez)
+npm run get-token
+
+# Ver qué se publicaría sin tocar LinkedIn ni DB (100% read-only)
+npm run dry-run
+
+# Publicar (producción)
+npm run publish-now
+
+# Activar scheduler diario (9:00 AM por defecto)
+npm run schedule
+
+# Tests con coverage
+npm test
+
+# Build TypeScript
+npm run build
+```
+
+### Dry-run en detalle
+
+El dry-run (`DRY_RUN=true`) o `npm run dry-run` imprime un reporte completo:
+
+```
+════════════════════════════════════════════════════════════════════════
+  DRY RUN — CANDIDATOS BOIA → LINKEDIN
+════════════════════════════════════════════════════════════════════════
+  Candidatos BOIA recibidos     : 6
+  Se publicarían                : 3
+  Saltados (boia score bajo)    : 1
+  Saltados (linkedin score bajo): 1
+  Saltados (duplicado)          : 0
+  Saltados (copy débil)         : 0
+  Saltados (throttle organismo) : 1
+════════════════════════════════════════════════════════════════════════
+
+  ── POST 1/3 [───────────────────────────────────────────────────]
+  ID            : boia-2026-03-001
+  Título        : BCRA establece nuevos requisitos de liquidez para PSP
+  Organismo     : BCRA
+  BOIA score    : 92/100
+  LinkedIn score: 88/100
+  Breakdown     : organism=25 audience=22 clarity=12 recency=14 conversation=9 bonus=10 penalty=-4
+  Audiencia     : fintechs, psp, compliance, bancos
+  Chars/Quality : 512 chars | quality=85/100
+  Hashtags      : #bcra #regulacionfinanciera #psp #fintech
+
+  TEXTO DEL POST:
+  ...
+```
+
+### Modo aprobación manual
+
+Con `APPROVAL_REQUIRED=true`, los posts se guardan como `pending_approval` en la DB en lugar de publicarse. Para publicarlos después:
+
+```bash
+npm run publish-approved
+```
+
+---
+
+## Scoring editorial
+
+El **LinkedIn Publish Score** (0-100) evalúa si un candidato de BOIA merece publicación en LinkedIn:
+
+| Señal | Pts | Criterio |
+|-------|-----|---------|
+| `organismRelevance` | 0–25 | BCRA/CNV/UIF/SEC/FED = 25; organismos LATAM = 15; desconocido = 5 |
+| `audienceImpact` | 0–25 | Overlap entre `affectedAudience` y audiencia target fintech/compliance |
+| `messageClarity` | 0–15 | Longitud y frases de impacto en `whyItMatters` |
+| `recency` | 0–15 | Decaimiento exponencial, half-life 52h |
+| `conversationPotential` | 0–10 | Tags de alta resonancia (cripto, IA, pagos, compliance) |
+| `dataBonus` | 0–10 | Datos numéricos (%), fechas, `linkedinAngle` provisto |
+| `technicalityPenalty` | 0–15 | Penaliza: refs legales densas, siglas sin contexto, `whyItMatters` corto |
+
+**Doble filtro:**
+1. `boiaRelevanceScore < BOIA_MIN_RELEVANCE` → rechazado (BOIA dijo que no es suficientemente relevante)
+2. `linkedinPublishScore < LINKEDIN_MIN_SCORE` → rechazado (no es adecuado para LinkedIn)
+
+---
+
+## Principios del copy regulatorio
+
+El generador de posts aplica estas reglas editoriales:
+
+- **Traduce, no transcribe**: usa `whyItMatters` o `linkedinAngle` como base, nunca copia el `summary`
+- **Empieza por el impacto**: hook basado en el tipo de acción (plazo, sanción, nuevo requisito)
+- **Organismo mencionado una sola vez**, brevemente, de forma natural
+- **No inventa efectos jurídicos** que BOIA no haya explicitado
+- **Tono**: profesional, concreto, orientado a regulación + negocio (no académico, no alarmista)
+- **CTA**: invita al debate ("¿Cómo lo están procesando en sus organizaciones?"), no a clickear
+
+---
+
+## Garantías de seguridad
+
+- **Deduplicación**: SHA-256 de `"boia::" + id + "::" + normalizedUrl` → ningún post se repite
+- **Concurrency lock**: tabla `locks` en SQLite con PID y timestamp. Stale locks se limpian automáticamente
+- **No retry en errores client-side**: 400/403/422 abortan sin reintentar
+- **Abort en auth error**: si LinkedIn devuelve un error de autenticación, el job se detiene
+- **Token maskeado**: los tokens nunca aparecen en logs
+- **Rate limiting defensivo**: `MAX_POSTS_PER_RUN` limita posts por corrida
+- **Throttle por organismo**: máximo 1 post por organismo por corrida (configurable)
+
+---
+
+## Migraciones de DB
+
+La base de datos usa `PRAGMA user_version` para versionar el schema. Las migraciones son idempotentes. Schema actual (v3):
+
+```sql
+CREATE TABLE posts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  content_hash TEXT UNIQUE NOT NULL,
+  title TEXT,
+  source_url TEXT,
+  score INTEGER,
+  status TEXT CHECK(status IN ('published','skipped','failed','pending_approval','dry_run')),
+  created_at TEXT DEFAULT (datetime('now')),
+  published_at_real TEXT,
+  linkedin_urn TEXT,
+  linkedin_post_id TEXT,
+  copy_text TEXT,
+  post_text TEXT,
+  copy_quality_score INTEGER,
+  error_message TEXT,
+  failure_reason TEXT,
+  score_breakdown TEXT,
+  -- v3: campos BOIA
+  boia_candidate_id TEXT,
+  boia_relevance_score INTEGER,
+  linkedin_publish_score INTEGER,
+  organism TEXT,
+  category TEXT
+);
+```
+
+---
+
+## Tests
+
+```bash
+npm test               # todos los tests con coverage
+npm test -- --testPathPattern=editorialScorer  # solo editorial scorer
+npm test -- --testPathPattern=boiaAdapters     # solo adapters BOIA
+```
+
+**Cobertura:**
+- `editorialScorer.test.ts` — 22 tests: scoring por organismo, audiencia, claridad, recencia, penalidades, bonus, ordenamiento
+- `boiaAdapters.test.ts` — 23 tests: JSON adapter (dedup, inválidos, tracking params), API adapter (array / { items }, errores HTTP), DB adapter (status filter, deserialización JSON, fila inválida)
+- `copy.test.ts` — 14 tests: happy path, validación calidad, copy regulatorio, truncado
+- `pipeline.test.ts` — 7 tests: E2E dry-run con fixture BOIA, filtros, read-only
+- `db.test.ts` — tests de DB: dedup, status values, concurrency lock, migración
+- `linkedin.test.ts` — tests del client: extractPostId, error kinds, retry semantics
+
+---
+
+## Flujo OAuth (primer uso)
+
+```bash
+# 1. Configurar en .env:
+LINKEDIN_CLIENT_ID=...
+LINKEDIN_CLIENT_SECRET=...
+LINKEDIN_REDIRECT_URI=http://localhost:3000/callback
+
+# 2. Obtener tokens:
+npm run get-token
+# Abre browser, autoriza, copia el token al .env
+
+# 3. Verificar:
+npm run dry-run
+```
+
+Los refresh tokens se gestionan automáticamente. Si el access token expira, se renueva antes de publicar (un solo intento).
+
+---
+
+## Variables de entorno completas
+
+Ver `.env.example` para la lista completa con comentarios.

@@ -1,4 +1,16 @@
-import { ScoredNewsItem } from "../scoring/scorer";
+/**
+ * Generador de copy para LinkedIn orientado a contenido regulatorio de BOIA.
+ *
+ * Principios editoriales:
+ * - Traducir la novedad regulatoria a impacto práctico, no copiar el resumen
+ * - Empezar por el "por qué importa", no por la norma en sí
+ * - Mencionar el organismo y la norma brevemente (1 vez), sin reproducir artículos
+ * - Tono profesional, claro, concreto — orientado a regulación + negocio
+ * - No inventar efectos jurídicos que BOIA no haya explicitado
+ * - CTA que invite a discusión, no a clickear
+ */
+
+import { ScoredBoiaCandidate } from "../scoring/editorialScorer";
 import { config } from "../config";
 import { logger } from "../config/logger";
 
@@ -15,71 +27,64 @@ export type CopyResult =
   | { ok: true; post: GeneratedPost }
   | { ok: false; reason: string };
 
-// ─── Banco de reflexiones por tema (múltiples variantes para evitar repetición) ─
+// ─── Templates de apertura por tipo de acción regulatoria ────────────────────
 
-const REFLECTIONS: Record<string, string[]> = {
-  ia: [
-    "La velocidad a la que evoluciona este campo exige que profesionales y organizaciones evalúen activamente sus estrategias de adopción.",
-    "La brecha entre quienes adoptan estas herramientas y quienes las ignoran se hace más visible cada trimestre.",
-    "El desafío ya no es solo técnico: es organizacional. Saber qué automatizar (y qué no) se vuelve una competencia estratégica.",
+const OPENING_HOOKS: Record<string, string[]> = {
+  nuevorequisito: [
+    "Nuevo requisito en vigencia:",
+    "Cambio normativo que impacta la operación:",
+    "El marco regulatorio actualiza sus exigencias:",
   ],
-  startup: [
-    "El ecosistema emprendedor sigue generando señales que vale la pena interpretar, más allá del ruido del ciclo de hype.",
-    "Los movimientos en capital de riesgo anticipan tendencias que, generalmente, se materializan en los mercados tradicionales 18-24 meses después.",
-    "Construir en condiciones de incertidumbre sigue siendo una de las habilidades más valiosas y menos formalizables del ecosistema.",
+  plazo: [
+    "Hay un plazo que vence y conviene tener en el radar:",
+    "Fecha límite en el horizonte:",
+    "El reloj corre:",
   ],
-  liderazgo: [
-    "La manera en que lideramos equipos está en revisión permanente. Estas perspectivas ayudan a calibrar la propia práctica.",
-    "El liderazgo efectivo hoy requiere menos certezas y más capacidad de crear condiciones para que otros decidan bien.",
-    "Los datos sobre equipos de alto rendimiento siguen apuntando en la misma dirección: autonomía + contexto claro + responsabilidad distribuida.",
+  sancion: [
+    "Precedente regulatorio relevante:",
+    "Caso de enforcement que marca el tono:",
+    "La autoridad envía una señal clara:",
   ],
-  fintech: [
-    "Los cambios en el entorno financiero impactan las decisiones estratégicas mucho antes de que aparezcan en los estados de resultados.",
-    "La regulación y la tecnología financiera rara vez se mueven al mismo ritmo. Esa fricción es, a la vez, riesgo y oportunidad.",
-    "La democratización del acceso financiero sigue siendo una de las transformaciones más subestimadas de la última década.",
+  consulta: [
+    "Oportunidad para influir en la regulación:",
+    "El regulador abre el debate:",
+    "Se abre el período de consulta pública:",
   ],
-  sostenibilidad: [
-    "La sostenibilidad pasó de ser diferencial a ser requisito de entrada en muchas industrias. La pregunta ya no es si, sino cómo.",
-    "Las empresas que integran criterios ESG en su core operativo están encontrando ventajas competitivas reales, no solo reputacionales.",
-  ],
-  cloud: [
-    "La infraestructura como ventaja competitiva: las decisiones de arquitectura de hoy determinan la agilidad de los próximos años.",
-    "La adopción cloud ya no es una pregunta de 'si' sino de 'qué modelo' y 'a qué velocidad'. La complejidad se desplazó.",
+  comunicacion: [
+    "Nueva comunicación oficial:",
+    "El regulador actualiza su posición:",
+    "Novedades desde el organismo:",
   ],
 };
 
 // ─── CTAs rotativos ───────────────────────────────────────────────────────────
 
 const CTAS = [
-  "¿Cómo está impactando esto en tu sector? Me interesa escuchar perspectivas.",
-  "El artículo completo vale la lectura si el tema es relevante para tu trabajo.",
-  "¿Lo estás viendo en tu industria también? Dejá tu perspectiva en los comentarios.",
-  "Comparto el enlace para quien quiera profundizar.",
-  "¿Qué ángulo de esto te parece más relevante para los próximos meses?",
+  "¿Cómo lo están procesando en sus organizaciones? Me interesa la perspectiva de quienes estén en compliance o producto.",
+  "¿Ya lo tienen en el radar? Para quienes trabajan en banca o fintech, vale la revisión.",
+  "¿Tienen identificado el impacto en sus procesos? Interesante leerlos en comentarios.",
+  "El debate sobre cómo implementar esto recién empieza. ¿Qué perspectiva tienen desde sus equipos?",
+  "Para quienes lo estén analizando: ¿cuál es el mayor desafío operativo que ven?",
 ];
 
 // ─── Generación ───────────────────────────────────────────────────────────────
 
-/**
- * Genera el texto del post y valida su calidad.
- * Devuelve { ok: false } si el copy no supera el umbral de calidad,
- * evitando publicar contenido débil o repetitivo.
- */
 export function generatePost(
-  item: ScoredNewsItem,
+  candidate: ScoredBoiaCandidate,
   recentPostTexts: string[] = []
 ): CopyResult {
-  const hashtags = buildHashtags(item.tags);
-  const body = buildBody(item);
-  const reflection = buildReflection(item, recentPostTexts);
-  const cta = buildCta(item);
+  const hook = buildHook(candidate);
+  const body = buildBody(candidate);
+  const audienceLine = buildAudienceLine(candidate);
+  const cta = buildCta(candidate);
+  const hashtags = buildHashtags(candidate);
   const hashtagLine = hashtags.join(" ");
 
-  const parts = [body, reflection, cta, hashtagLine].filter(Boolean);
+  const parts = [hook, body, audienceLine, cta, hashtagLine].filter(Boolean);
   const rawText = parts.join("\n\n");
 
   const maxChars = config.maxPostChars;
-  const finalText = truncateToSentence(rawText, maxChars);
+  const finalText = truncateGracefully(rawText, maxChars);
 
   if (rawText.length > maxChars) {
     logger.warn("Post truncado al límite de caracteres", {
@@ -88,16 +93,17 @@ export function generatePost(
     });
   }
 
-  const qualityScore = assessQuality(finalText, item);
+  const qualityScore = assessQuality(finalText, candidate);
 
-  logger.debug("Post generado", {
-    title: item.title.substring(0, 50),
+  logger.debug("Post generado para candidato BOIA", {
+    id: candidate.id,
     charCount: finalText.length,
     qualityScore,
     hashtags,
   });
 
-  // Validar calidad mínima
+  // ── Validaciones de calidad ───────────────────────────────────────────────
+
   if (finalText.length < config.copyMinChars) {
     const reason = `Copy demasiado corto: ${finalText.length} chars (mínimo ${config.copyMinChars})`;
     logger.warn("Copy rechazado: " + reason);
@@ -106,15 +112,14 @@ export function generatePost(
 
   if (qualityScore < 40) {
     const reason = `Quality score insuficiente: ${qualityScore}/100`;
-    logger.warn("Copy rechazado: " + reason, { title: item.title.substring(0, 60) });
+    logger.warn("Copy rechazado: " + reason, { id: candidate.id });
     return { ok: false, reason };
   }
 
-  // Detectar overlap excesivo con posts recientes
   if (recentPostTexts.length > 0) {
-    const overlapRatio = computeMaxWordOverlap(finalText, recentPostTexts);
-    if (overlapRatio > config.copyPhraseOverlapThreshold) {
-      const reason = `Overlap con post reciente: ${Math.round(overlapRatio * 100)}% (máximo ${Math.round(config.copyPhraseOverlapThreshold * 100)}%)`;
+    const overlap = computeMaxBigramOverlap(finalText, recentPostTexts);
+    if (overlap > config.copyPhraseOverlapThreshold) {
+      const reason = `Overlap con post reciente: ${Math.round(overlap * 100)}% > ${Math.round(config.copyPhraseOverlapThreshold * 100)}%`;
       logger.warn("Copy rechazado: " + reason);
       return { ok: false, reason };
     }
@@ -122,75 +127,98 @@ export function generatePost(
 
   return {
     ok: true,
-    post: {
-      text: finalText,
-      hashtags,
-      charCount: finalText.length,
-      qualityScore,
-    },
+    post: { text: finalText, hashtags, charCount: finalText.length, qualityScore },
   };
 }
 
-// ─── Builders privados ────────────────────────────────────────────────────────
+// ─── Builders ────────────────────────────────────────────────────────────────
 
-function buildBody(item: ScoredNewsItem): string {
-  const dataPoint = extractDataPoint(item.summary);
+function buildHook(candidate: ScoredBoiaCandidate): string {
+  // Detectar tipo de acción desde el título o categoría
+  const combined = `${candidate.title} ${candidate.category}`.toLowerCase();
+  let hookType = "comunicacion";
 
-  let paragraph1: string;
-  if (dataPoint) {
-    const rest = trimSentence(item.summary.replace(dataPoint, "").trim(), 180);
-    paragraph1 = `${item.title}\n\n${dataPoint}${rest ? " " + decapitalize(rest) : ""}`;
-  } else {
-    paragraph1 = `${item.title}\n\n${trimSentence(item.summary, 220)}`;
-  }
+  if (/plazo|venc|fecha|días?/.test(combined)) hookType = "plazo";
+  else if (/sanción|sancionó|multó|infracción/.test(combined)) hookType = "sancion";
+  else if (/consulta pública|período de consulta/.test(combined)) hookType = "consulta";
+  else if (/nuevo requisito|nueva exigencia|establece|incorpora|modifica/.test(combined)) hookType = "nuevorequisito";
 
-  return paragraph1;
+  const variants = OPENING_HOOKS[hookType] ?? OPENING_HOOKS["comunicacion"];
+  const idx = parseInt(candidate.contentHash.substring(0, 2), 16) % variants.length;
+  const hook = variants[idx];
+
+  // Agregar el título de la noticia bajo el hook
+  return `${hook}\n${candidate.title}`;
 }
 
-function buildReflection(item: ScoredNewsItem, recentTexts: string[]): string {
-  const tags = item.tags.map((t) => t.toLowerCase().trim());
-
-  const topicKey = detectTopic(tags);
-  if (!topicKey) return "";
-
-  const variants = REFLECTIONS[topicKey];
-  if (!variants || variants.length === 0) return "";
-
-  // Elegir variante que tenga el menor overlap con posts recientes
-  let bestVariant = variants[0];
-  let lowestOverlap = Infinity;
-
-  for (const variant of variants) {
-    const overlap = recentTexts.length > 0
-      ? computeMaxWordOverlap(variant, recentTexts)
-      : 0;
-    if (overlap < lowestOverlap) {
-      lowestOverlap = overlap;
-      bestVariant = variant;
-    }
+function buildBody(candidate: ScoredBoiaCandidate): string {
+  // Si BOIA proveyó un ángulo editorial, usarlo como base del cuerpo
+  if (candidate.linkedinAngle && candidate.linkedinAngle.trim().length > 30) {
+    return translateToPlainLanguage(candidate.linkedinAngle, candidate);
   }
 
-  // Si todas las variantes tienen overlap alto, devolver vacío en lugar de repetir
-  if (lowestOverlap > config.copyPhraseOverlapThreshold) {
-    logger.debug("Todas las reflexiones tienen overlap alto, omitiendo", { topicKey });
-    return "";
+  // Si no, construir desde whyItMatters
+  return translateToPlainLanguage(candidate.whyItMatters, candidate);
+}
+
+/**
+ * Transforma texto técnico de BOIA en lenguaje de LinkedIn.
+ * No inventa datos: solo reformula lo que ya está en el texto.
+ */
+function translateToPlainLanguage(text: string, candidate: ScoredBoiaCandidate): string {
+  // Extraer datos numéricos para preservarlos
+  const dataPoints = extractDataPoints(text);
+
+  // Tomar las primeras 2-3 oraciones del texto, reformuladas
+  const sentences = text
+    .replace(/\n+/g, " ")
+    .split(/(?<=[.!?])\s+/)
+    .filter((s) => s.trim().length > 20)
+    .slice(0, 3);
+
+  let body = sentences.join(" ").trim();
+
+  // Si hay datos extraídos, verificar que estén en el cuerpo
+  if (dataPoints.length > 0 && !dataPoints.some((d) => body.includes(d))) {
+    body = `${dataPoints[0]} ${body}`;
   }
 
-  return bestVariant;
+  // Agregar referencia al organismo de forma natural (1 vez)
+  if (!body.toLowerCase().includes(candidate.organism.toLowerCase())) {
+    body = `Según ${candidate.organism}, ${decapitalize(body)}`;
+  }
+
+  return trimToSentence(body, 400);
 }
 
-function buildCta(item: ScoredNewsItem): string {
-  // Rotación determinista por hash del ítem para que sea reproducible
-  const index = parseInt(item.contentHash.substring(0, 4), 16) % CTAS.length;
-  return CTAS[index];
+function buildAudienceLine(candidate: ScoredBoiaCandidate): string {
+  if (candidate.affectedAudience.length === 0) return "";
+
+  const audience = candidate.affectedAudience
+    .slice(0, 3)
+    .map((a) => a.toLowerCase())
+    .join(", ");
+
+  return `Aplica especialmente a: ${audience}.`;
 }
 
-function buildHashtags(tags: string[]): string[] {
-  return tags
-    .slice(0, config.maxHashtags)
-    .map((tag) =>
+function buildCta(candidate: ScoredBoiaCandidate): string {
+  const idx = parseInt(candidate.contentHash.substring(2, 4), 16) % CTAS.length;
+  return CTAS[idx];
+}
+
+function buildHashtags(candidate: ScoredBoiaCandidate): string[] {
+  const candidates: string[] = [
+    candidate.organism,
+    candidate.category,
+    ...candidate.tags,
+    ...candidate.affectedAudience.slice(0, 2),
+  ];
+
+  return candidates
+    .map((t) =>
       "#" +
-      tag
+      t
         .toLowerCase()
         .replace(/\s+/g, "")
         .replace(/[áàâä]/g, "a")
@@ -201,109 +229,59 @@ function buildHashtags(tags: string[]): string[] {
         .replace(/ñ/g, "n")
         .replace(/[^a-z0-9]/g, "")
     )
-    .filter((h) => h.length > 1);
+    .filter((h) => h.length > 2)
+    .filter((h, i, arr) => arr.indexOf(h) === i) // dedup
+    .slice(0, config.maxHashtags);
 }
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+// ─── Quality assessment ───────────────────────────────────────────────────────
 
-function detectTopic(tags: string[]): string | null {
-  if (tags.some((t) => ["ia", "ai", "inteligencia artificial", "machine learning", "llm"].includes(t))) return "ia";
-  if (tags.some((t) => ["startup", "emprendimiento", "venture"].includes(t))) return "startup";
-  if (tags.some((t) => ["liderazgo", "leadership", "management", "talento"].includes(t))) return "liderazgo";
-  if (tags.some((t) => ["fintech", "economía", "economia", "negocios"].includes(t))) return "fintech";
-  if (tags.some((t) => ["sostenibilidad", "sustainability"].includes(t))) return "sostenibilidad";
-  if (tags.some((t) => ["cloud", "infraestructura"].includes(t))) return "cloud";
-  return null;
-}
-
-function extractDataPoint(text: string): string | null {
-  const patterns = [
-    /(\d+(?:[.,]\d+)?%[^.]{0,60}\.)/,
-    /(\$[\d.,]+[^.]{0,60}(?:millones|billones|mil millones)[^.]{0,30}\.)/i,
-    /(\d+(?:[.,]\d+)?(?:\s*(?:millones|mil millones))[^.]{0,40}\.)/i,
-  ];
-
-  for (const pattern of patterns) {
-    const match = text.match(pattern);
-    if (match?.[1]) return match[1].trim();
-  }
-  return null;
-}
-
-function trimSentence(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  const truncated = text.substring(0, maxChars);
-  const lastPeriod = Math.max(truncated.lastIndexOf("."), truncated.lastIndexOf("?"), truncated.lastIndexOf("!"));
-  return lastPeriod > maxChars * 0.6
-    ? truncated.substring(0, lastPeriod + 1)
-    : truncated.trimEnd() + "...";
-}
-
-function truncateToSentence(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  return trimSentence(text, maxChars);
-}
-
-function decapitalize(text: string): string {
-  return text.charAt(0).toLowerCase() + text.slice(1);
-}
-
-/**
- * Score de calidad del copy (0-100).
- * Factores: longitud, estructura, presencia del título, datos concretos.
- */
-function assessQuality(text: string, item: ScoredNewsItem): number {
+function assessQuality(text: string, candidate: ScoredBoiaCandidate): number {
   let score = 0;
 
-  // Longitud base
-  if (text.length >= 300) score += 30;
-  else if (text.length >= 200) score += 20;
-  else if (text.length >= 100) score += 10;
+  // Longitud
+  if (text.length >= 400) score += 25;
+  else if (text.length >= 250) score += 15;
+  else if (text.length >= 150) score += 8;
 
-  // Tiene al menos 2 párrafos
-  if (text.includes("\n\n")) score += 20;
+  // Estructura: al menos 2 párrafos
+  if (text.includes("\n\n")) score += 15;
 
-  // El título aparece en el post (no se perdió en el truncado)
-  if (text.includes(item.title.substring(0, 30))) score += 15;
+  // Menciona el organismo
+  if (text.toLowerCase().includes(candidate.organism.toLowerCase().substring(0, 4))) score += 10;
+
+  // Tiene datos concretos
+  if (/\d+(?:[.,]\d+)?%|\$[\d,.]+|\d+ (?:días|meses|empresas|entidades)/i.test(text)) score += 15;
 
   // Tiene hashtags
   if (/#\w+/.test(text)) score += 10;
 
-  // Tiene datos concretos (números, porcentajes)
-  if (/\d+(?:[.,]\d+)?%|\$[\d.,]+|\d+ (?:millones|personas|empresas|países)/i.test(text)) {
-    score += 15;
-  }
+  // Tiene CTA (pregunta o llamado)
+  if (/[?¿]/.test(text) || /comentarios|perspectiva|radar|equipos/i.test(text)) score += 15;
 
-  // Tiene CTA (signo de pregunta o llamado a acción)
-  if (/[?¿]/.test(text) || /comparto|dejá|comentarios|perspectiva/i.test(text)) {
-    score += 10;
-  }
+  // No copia literalmente el summary (señal de que fue transformado)
+  const summaryStart = candidate.summary.substring(0, 50).toLowerCase();
+  if (!text.toLowerCase().includes(summaryStart)) score += 10;
 
   return Math.min(100, score);
 }
 
-/**
- * Calcula el overlap máximo de palabras entre el nuevo texto y cualquiera de los recientes.
- * Usa coeficiente de Jaccard sobre bigramas para evitar falsos positivos de palabras cortas.
- */
-function computeMaxWordOverlap(newText: string, recentTexts: string[]): number {
+// ─── Overlap de bigramas ──────────────────────────────────────────────────────
+
+function computeMaxBigramOverlap(newText: string, recentTexts: string[]): number {
   const newBigrams = extractBigrams(newText);
   if (newBigrams.size === 0) return 0;
 
-  let maxOverlap = 0;
-
+  let max = 0;
   for (const recent of recentTexts) {
     const recentBigrams = extractBigrams(recent);
     if (recentBigrams.size === 0) continue;
-
-    const intersection = new Set([...newBigrams].filter((b) => recentBigrams.has(b)));
-    const union = new Set([...newBigrams, ...recentBigrams]);
-    const jaccard = intersection.size / union.size;
-
-    if (jaccard > maxOverlap) maxOverlap = jaccard;
+    const intersection = [...newBigrams].filter((b) => recentBigrams.has(b)).length;
+    const union = new Set([...newBigrams, ...recentBigrams]).size;
+    const jaccard = intersection / union;
+    if (jaccard > max) max = jaccard;
   }
-
-  return maxOverlap;
+  return max;
 }
 
 function extractBigrams(text: string): Set<string> {
@@ -311,11 +289,45 @@ function extractBigrams(text: string): Set<string> {
     .toLowerCase()
     .replace(/[^a-záéíóúüñ\s]/gi, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 3); // ignorar palabras muy cortas
-
+    .filter((w) => w.length > 3);
   const bigrams = new Set<string>();
   for (let i = 0; i < words.length - 1; i++) {
     bigrams.add(`${words[i]}_${words[i + 1]}`);
   }
   return bigrams;
+}
+
+// ─── Utilidades ───────────────────────────────────────────────────────────────
+
+function extractDataPoints(text: string): string[] {
+  const patterns = [
+    /\d+(?:[.,]\d+)?%[^.]{0,60}\./,
+    /\$[\d.,]+[^.]{0,60}(?:millones|billones|mil millones)[^.]{0,30}\./i,
+    /\d+ (?:días|meses|años)[^.]{0,40}\./i,
+  ];
+  const found: string[] = [];
+  for (const p of patterns) {
+    const m = text.match(p);
+    if (m) found.push(m[0].trim());
+  }
+  return found;
+}
+
+function trimToSentence(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const truncated = text.substring(0, maxChars);
+  const last = Math.max(
+    truncated.lastIndexOf("."),
+    truncated.lastIndexOf("?"),
+    truncated.lastIndexOf("!")
+  );
+  return last > maxChars * 0.6 ? truncated.substring(0, last + 1) : truncated.trimEnd() + "...";
+}
+
+function truncateGracefully(text: string, maxChars: number): string {
+  return trimToSentence(text, maxChars);
+}
+
+function decapitalize(text: string): string {
+  return text.charAt(0).toLowerCase() + text.slice(1);
 }

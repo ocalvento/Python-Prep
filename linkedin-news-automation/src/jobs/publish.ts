@@ -1,6 +1,6 @@
 import "dotenv/config";
-import { readNewsFile } from "../ingest/newsReader";
-import { scoreItems } from "../scoring/scorer";
+import { fetchBoidaCandidates } from "../ingest";
+import { scoreCandidates } from "../scoring/editorialScorer";
 import { generatePost } from "../copy/generator";
 import { publishPost, LinkedInApiError, extractPostId } from "../linkedin/client";
 import {
@@ -10,6 +10,7 @@ import {
   acquireLock,
   releaseLock,
   closeDb,
+  FailureReason,
 } from "../db";
 import { config } from "../config";
 import { logger } from "../config/logger";
@@ -18,35 +19,30 @@ export interface PublishResult {
   total: number;
   published: number;
   pending_approval: number;
-  skipped_threshold: number;
+  skipped_boia_score: number;
+  skipped_linkedin_score: number;
   skipped_duplicate: number;
   skipped_copy_quality: number;
+  skipped_organism_throttle: number;
   failed: number;
 }
 
-/**
- * Pipeline completo: ingest → score → copy → [publish | pending] → persist.
- *
- * Garantías operativas:
- *   - Lock de ejecución concurrente: aborta si hay otro proceso activo
- *   - Límite de posts por corrida: MAX_POSTS_PER_RUN
- *   - Modo approval: guarda posts para revisión manual en lugar de publicar
- */
 export async function runPublishJob(): Promise<PublishResult> {
   const result: PublishResult = {
     total: 0,
     published: 0,
     pending_approval: 0,
-    skipped_threshold: 0,
+    skipped_boia_score: 0,
+    skipped_linkedin_score: 0,
     skipped_duplicate: 0,
     skipped_copy_quality: 0,
+    skipped_organism_throttle: 0,
     failed: 0,
   };
 
-  // ── Lock de concurrencia ──────────────────────────────────────────────────
   const lockAcquired = acquireLock();
   if (!lockAcquired) {
-    logger.warn("Job abortado: otra instancia está en ejecución (lock activo)");
+    logger.warn("Job abortado: otra instancia está en ejecución");
     return result;
   }
 
@@ -59,214 +55,223 @@ export async function runPublishJob(): Promise<PublishResult> {
 }
 
 async function runPipeline(result: PublishResult): Promise<PublishResult> {
-  logger.info("=== Iniciando job de publicación ===", {
-    threshold: config.scoreThreshold,
+  logger.info("=== Iniciando job de publicación BOIA → LinkedIn ===", {
+    source: config.boiaSource,
+    boiaMinRelevance: config.boiaMinRelevance,
+    linkedinMinScore: config.linkedinMinScore,
+    maxPostsPerRun: config.maxPostsPerRun,
     dryRun: config.dryRun,
     approvalRequired: config.approvalRequired,
-    maxPostsPerRun: config.maxPostsPerRun,
   });
 
-  // 1. Ingest
-  const newsItems = readNewsFile();
-  result.total = newsItems.length;
+  // 1. Fetch desde BOIA
+  const candidates = await fetchBoidaCandidates();
+  result.total = candidates.length;
 
-  if (newsItems.length === 0) {
-    logger.warn("No se encontraron noticias en el archivo de entrada");
+  if (candidates.length === 0) {
+    logger.warn("No se encontraron candidatos BOIA");
     return result;
   }
 
-  // 2. Scoring
-  const scoredItems = scoreItems(newsItems);
-  const aboveThreshold = scoredItems.filter((i) => i.score >= config.scoreThreshold);
+  // 2. Scoring editorial para LinkedIn
+  const scored = scoreCandidates(candidates);
 
   logger.info("Scoring completado", {
-    total: scoredItems.length,
-    aboveThreshold: aboveThreshold.length,
-    topScore: scoredItems[0]?.score,
+    total: scored.length,
+    passBoiaMin: scored.filter((c) => c.boiaRelevanceScore >= config.boiaMinRelevance).length,
+    passLinkedinMin: scored.filter((c) => c.linkedinPublishScore >= config.linkedinMinScore).length,
+    top: scored[0] ? `${scored[0].title.substring(0, 50)} (boia=${scored[0].boiaRelevanceScore}, li=${scored[0].linkedinPublishScore})` : "—",
   });
 
-  // 3. Cargar textos recientes para validación de overlap en copy
+  // 3. Textos de posts recientes para overlap check
   const recentPosts = getRecentPosts(config.recentPostsToCheck, "published");
   const recentPostTexts = recentPosts
     .map((p) => p.copy_text ?? p.post_text ?? "")
     .filter(Boolean);
 
+  // 4. Throttle por organismo: track de organismos publicados en esta corrida
+  const organismsThisRun = new Map<string, number>(); // organism → score del publicado
+
   let publishedThisRun = 0;
 
-  // 4. Procesar cada ítem (ya ordenados por score desc)
-  for (const item of scoredItems) {
+  for (const candidate of scored) {
     if (publishedThisRun >= config.maxPostsPerRun) {
-      logger.info("Límite de posts por corrida alcanzado", {
-        limit: config.maxPostsPerRun,
-      });
+      logger.info("Límite de posts por corrida alcanzado", { limit: config.maxPostsPerRun });
       break;
     }
 
-    logger.info("Procesando noticia", {
-      title: item.title.substring(0, 70),
-      score: item.score,
-      ageHours: Math.round(item.ageHours),
-    });
+    const logCtx = {
+      id: candidate.id,
+      title: candidate.title.substring(0, 60),
+      boiaScore: candidate.boiaRelevanceScore,
+      linkedinScore: candidate.linkedinPublishScore,
+    };
 
-    // Verificar umbral
-    if (item.score < config.scoreThreshold) {
-      logger.info("Saltando: score bajo el umbral", {
-        score: item.score,
-        threshold: config.scoreThreshold,
+    logger.info("Procesando candidato", logCtx);
+
+    // ── Filtro 1: boia_relevance_score ─────────────────────────────────────
+    if (candidate.boiaRelevanceScore < config.boiaMinRelevance) {
+      logger.info("Saltando: boia_relevance_score bajo umbral", {
+        score: candidate.boiaRelevanceScore,
+        min: config.boiaMinRelevance,
       });
-      savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
-        status: "skipped",
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
-      });
-      result.skipped_threshold++;
+      savePost(buildSkipRecord(candidate, "boia_score",
+        `boiaRelevanceScore ${candidate.boiaRelevanceScore} < ${config.boiaMinRelevance}`));
+      result.skipped_boia_score++;
       continue;
     }
 
-    // Verificar duplicado
-    if (isAlreadyProcessed(item.contentHash)) {
-      logger.info("Saltando: ya fue procesado anteriormente", {
-        hash: item.contentHash.substring(0, 12),
+    // ── Filtro 2: linkedin_publish_score ───────────────────────────────────
+    if (candidate.linkedinPublishScore < config.linkedinMinScore) {
+      logger.info("Saltando: linkedin_publish_score bajo umbral", {
+        score: candidate.linkedinPublishScore,
+        min: config.linkedinMinScore,
       });
+      savePost(buildSkipRecord(candidate, "linkedin_score",
+        `linkedinPublishScore ${candidate.linkedinPublishScore} < ${config.linkedinMinScore}`));
+      result.skipped_linkedin_score++;
+      continue;
+    }
+
+    // ── Filtro 3: deduplicación ────────────────────────────────────────────
+    if (isAlreadyProcessed(candidate.contentHash)) {
+      logger.info("Saltando: ya fue procesado", { hash: candidate.contentHash.substring(0, 12) });
       result.skipped_duplicate++;
       continue;
     }
 
-    // Generar copy
-    const copyResult = generatePost(item, recentPostTexts);
+    // ── Filtro 4: throttle por organismo ───────────────────────────────────
+    const orgKey = candidate.organism.toLowerCase().trim();
+    const prevScore = organismsThisRun.get(orgKey);
+    if (prevScore !== undefined) {
+      const isExceptional = candidate.linkedinPublishScore >= config.linkedinExceptionalScore;
+      if (!isExceptional) {
+        logger.info("Saltando: throttle por organismo", {
+          organism: candidate.organism,
+          prevScore,
+          currentScore: candidate.linkedinPublishScore,
+          exceptionalThreshold: config.linkedinExceptionalScore,
+        });
+        savePost(buildSkipRecord(candidate, "organism_throttle",
+          `Organismo ${candidate.organism} ya publicado en esta corrida (score=${prevScore}). Requiere >= ${config.linkedinExceptionalScore} para publicar segundo item.`));
+        result.skipped_organism_throttle++;
+        continue;
+      }
+      logger.info("Score excepcional: publicando segundo item del mismo organismo", {
+        organism: candidate.organism,
+        score: candidate.linkedinPublishScore,
+      });
+    }
+
+    // ── Generar copy ───────────────────────────────────────────────────────
+    const copyResult = generatePost(candidate, recentPostTexts);
 
     if (!copyResult.ok) {
-      logger.warn("Copy rechazado, saltando noticia", {
-        title: item.title.substring(0, 60),
-        reason: copyResult.reason,
-      });
-      savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
-        status: "skipped",
-        failure_reason: "copy_quality",
-        error_message: copyResult.reason,
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
-      });
+      logger.warn("Copy rechazado", { id: candidate.id, reason: copyResult.reason });
+      savePost(buildSkipRecord(candidate, "copy_quality", copyResult.reason, candidate.linkedinPublishScore));
       result.skipped_copy_quality++;
       continue;
     }
 
-    const { post: generated } = copyResult;
+    const { post } = copyResult;
 
-    // ── Modo approval: guardar para revisión manual ──────────────────────────
+    // ── Modo approval ──────────────────────────────────────────────────────
     if (config.approvalRequired && !config.dryRun) {
       savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
+        content_hash: candidate.contentHash,
+        title: candidate.title,
+        source_url: candidate.normalizedSourceUrl,
+        score: candidate.linkedinPublishScore,
         status: "pending_approval",
-        copy_text: generated.text,
-        post_text: generated.text,
-        copy_quality_score: generated.qualityScore,
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
+        boia_candidate_id: candidate.id,
+        boia_relevance_score: candidate.boiaRelevanceScore,
+        linkedin_publish_score: candidate.linkedinPublishScore,
+        organism: candidate.organism,
+        category: candidate.category,
+        copy_text: post.text,
+        post_text: post.text,
+        copy_quality_score: post.qualityScore,
+        score_breakdown: JSON.stringify(candidate.scoreBreakdown),
       });
-      logger.info("Post guardado para aprobación manual", {
-        title: item.title.substring(0, 60),
-        score: item.score,
-        qualityScore: generated.qualityScore,
-      });
+      logger.info("Post guardado para aprobación manual", logCtx);
       result.pending_approval++;
       continue;
     }
 
-    // ── Dry run: registrar sin publicar ──────────────────────────────────────
+    // ── Dry run ────────────────────────────────────────────────────────────
     if (config.dryRun) {
-      savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
-        status: "dry_run",
-        copy_text: generated.text,
-        post_text: generated.text,
-        copy_quality_score: generated.qualityScore,
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
-      });
       logger.info("[DRY RUN] Post listo para publicar", {
-        score: item.score,
-        charCount: generated.charCount,
-        qualityScore: generated.qualityScore,
+        ...logCtx,
+        charCount: post.charCount,
+        qualityScore: post.qualityScore,
+        preview: post.text.substring(0, 120),
       });
       result.published++;
       publishedThisRun++;
+      recentPostTexts.unshift(post.text);
+      organismsThisRun.set(orgKey, candidate.linkedinPublishScore);
       continue;
     }
 
-    // ── Publicar en LinkedIn ──────────────────────────────────────────────────
+    // ── Publicar en LinkedIn ───────────────────────────────────────────────
     try {
-      const postUrn = await publishPost(generated.text);
+      const postUrn = await publishPost(post.text);
       const postId = extractPostId(postUrn);
 
       savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
+        content_hash: candidate.contentHash,
+        title: candidate.title,
+        source_url: candidate.normalizedSourceUrl,
+        score: candidate.linkedinPublishScore,
         status: "published",
+        boia_candidate_id: candidate.id,
+        boia_relevance_score: candidate.boiaRelevanceScore,
+        linkedin_publish_score: candidate.linkedinPublishScore,
+        organism: candidate.organism,
+        category: candidate.category,
         linkedin_urn: postUrn,
         linkedin_post_id: postId,
-        copy_text: generated.text,
-        post_text: generated.text,
-        copy_quality_score: generated.qualityScore,
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
+        copy_text: post.text,
+        post_text: post.text,
+        copy_quality_score: post.qualityScore,
+        score_breakdown: JSON.stringify(candidate.scoreBreakdown),
         published_at_real: new Date().toISOString(),
       });
 
-      logger.info("Publicado exitosamente", {
-        postUrn,
-        postId,
-        title: item.title.substring(0, 60),
-      });
-
+      logger.info("Publicado exitosamente", { ...logCtx, postUrn, postId });
       result.published++;
       publishedThisRun++;
-
-      // Agregar el texto publicado a la lista de recientes para el overlap check
-      recentPostTexts.unshift(generated.text);
-
+      recentPostTexts.unshift(post.text);
+      organismsThisRun.set(orgKey, candidate.linkedinPublishScore);
     } catch (error) {
-      const isTypedError = error instanceof LinkedInApiError;
-      const errMsg = isTypedError ? error.message : String(error);
-      const failureReason = isTypedError ? error.kind : "unknown";
+      const isTyped = error instanceof LinkedInApiError;
+      const errMsg = isTyped ? error.message : String(error);
+      const failureReason: FailureReason = isTyped ? error.kind : "unknown";
 
-      logger.error("Error al publicar", {
-        title: item.title.substring(0, 60),
-        kind: failureReason,
-        error: errMsg,
-      });
+      logger.error("Error al publicar", { ...logCtx, kind: failureReason, error: errMsg });
 
       savePost({
-        content_hash: item.contentHash,
-        title: item.title,
-        source_url: item.normalizedUrl,
-        score: item.score,
+        content_hash: candidate.contentHash,
+        title: candidate.title,
+        source_url: candidate.normalizedSourceUrl,
+        score: candidate.linkedinPublishScore,
         status: "failed",
-        copy_text: generated.text,
-        post_text: generated.text,
+        boia_candidate_id: candidate.id,
+        boia_relevance_score: candidate.boiaRelevanceScore,
+        linkedin_publish_score: candidate.linkedinPublishScore,
+        organism: candidate.organism,
+        category: candidate.category,
+        copy_text: post.text,
+        post_text: post.text,
         error_message: errMsg,
         failure_reason: failureReason,
-        score_breakdown: JSON.stringify(item.scoreBreakdown),
+        score_breakdown: JSON.stringify(candidate.scoreBreakdown),
       });
 
       result.failed++;
 
-      // Ante errores de auth/scope no tiene sentido seguir con más posts
       if (failureReason === "auth_error" || failureReason === "scope_error") {
-        logger.error("Error de autenticación/permisos — abortando el resto del job", {
-          kind: failureReason,
-        });
+        logger.error("Error de autenticación — abortando resto del job", { kind: failureReason });
         break;
       }
     }
@@ -276,7 +281,31 @@ async function runPipeline(result: PublishResult): Promise<PublishResult> {
   return result;
 }
 
-// Ejecutar directamente si es el entry point
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function buildSkipRecord(
+  candidate: ReturnType<typeof scoreCandidates>[number],
+  reason: FailureReason,
+  message: string,
+  linkedinScore?: number
+) {
+  return {
+    content_hash: candidate.contentHash,
+    title: candidate.title,
+    source_url: candidate.normalizedSourceUrl,
+    score: linkedinScore ?? candidate.linkedinPublishScore,
+    status: "skipped" as const,
+    boia_candidate_id: candidate.id,
+    boia_relevance_score: candidate.boiaRelevanceScore,
+    linkedin_publish_score: linkedinScore ?? candidate.linkedinPublishScore,
+    organism: candidate.organism,
+    category: candidate.category,
+    failure_reason: reason,
+    error_message: message,
+    score_breakdown: JSON.stringify(candidate.scoreBreakdown),
+  };
+}
+
 if (require.main === module) {
   runPublishJob()
     .then((result) => {
@@ -284,7 +313,7 @@ if (require.main === module) {
       process.exit(result.failed > 0 ? 1 : 0);
     })
     .catch((err) => {
-      logger.error("Error fatal en el job de publicación", { error: String(err) });
+      logger.error("Error fatal", { error: String(err) });
       process.exit(1);
     });
 }

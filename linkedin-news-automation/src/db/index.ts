@@ -4,12 +4,11 @@ import * as path from "path";
 import { config } from "../config";
 import { logger } from "../config/logger";
 
-// Versión actual del esquema. Incrementar cuando se agregan migraciones.
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 let db: Database.Database | null = null;
 
-// ─── Schema inicial (v1) ──────────────────────────────────────────────────────
+// ─── Schema base (v1) ─────────────────────────────────────────────────────────
 
 const SCHEMA_V1 = `
 CREATE TABLE IF NOT EXISTS posts (
@@ -49,7 +48,7 @@ CREATE TABLE IF NOT EXISTS locks (
 );
 `;
 
-// ─── Migraciones incrementales ────────────────────────────────────────────────
+// ─── Migraciones ──────────────────────────────────────────────────────────────
 
 const MIGRATIONS: Record<number, string> = {
   2: `
@@ -59,6 +58,15 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE posts ADD COLUMN copy_text          TEXT;
     ALTER TABLE posts ADD COLUMN published_at_real  DATETIME;
     ALTER TABLE posts ADD COLUMN copy_quality_score INTEGER;
+  `,
+  3: `
+    ALTER TABLE posts ADD COLUMN boia_candidate_id  TEXT;
+    ALTER TABLE posts ADD COLUMN boia_relevance_score INTEGER;
+    ALTER TABLE posts ADD COLUMN linkedin_publish_score INTEGER;
+    ALTER TABLE posts ADD COLUMN organism           TEXT;
+    ALTER TABLE posts ADD COLUMN category           TEXT;
+    CREATE INDEX IF NOT EXISTS idx_posts_organism ON posts(organism);
+    CREATE INDEX IF NOT EXISTS idx_posts_boia_id  ON posts(boia_candidate_id);
   `,
 };
 
@@ -75,41 +83,29 @@ export function getDb(): Database.Database {
   db = new Database(config.dbPath);
   db.pragma("journal_mode = WAL");
   db.pragma("foreign_keys = ON");
-
-  // Crear esquema base si no existe
   db.exec(SCHEMA_V1);
-
-  // Aplicar migraciones pendientes
   applyMigrations(db);
 
-  logger.debug("Base de datos inicializada", {
-    path: config.dbPath,
-    version: SCHEMA_VERSION,
-  });
-
+  logger.debug("Base de datos inicializada", { path: config.dbPath, version: SCHEMA_VERSION });
   return db;
 }
 
 function applyMigrations(database: Database.Database): void {
-  const currentVersion = (database.pragma("user_version") as { user_version: number }[])[0]
-    ?.user_version ?? 0;
+  const currentVersion =
+    (database.pragma("user_version") as { user_version: number }[])[0]?.user_version ?? 0;
 
   if (currentVersion >= SCHEMA_VERSION) return;
 
   for (let v = currentVersion + 1; v <= SCHEMA_VERSION; v++) {
     const sql = MIGRATIONS[v];
     if (!sql) continue;
-
-    logger.info(`Aplicando migración de DB a versión ${v}`);
-
-    // Ejecutar cada sentencia por separado (SQLite no permite múltiples ALTER en un exec)
+    logger.info(`Aplicando migración DB v${v}`);
     for (const stmt of sql.split(";").map((s) => s.trim()).filter(Boolean)) {
       try {
         database.exec(stmt + ";");
       } catch (err) {
-        // Ignorar errores de columna duplicada (idempotente)
-        if (String(err).includes("duplicate column name")) {
-          logger.debug(`Columna ya existe, ignorando: ${stmt}`);
+        if (String(err).includes("duplicate column name") || String(err).includes("already exists")) {
+          logger.debug(`Ya existe: ${stmt.substring(0, 60)}`);
         } else {
           throw err;
         }
@@ -137,6 +133,9 @@ export type FailureReason =
   | "validation_error"
   | "network_error"
   | "copy_quality"
+  | "boia_score"
+  | "linkedin_score"
+  | "organism_throttle"
   | "unknown";
 
 export interface PostRecord {
@@ -146,14 +145,24 @@ export interface PostRecord {
   source_url: string;
   score: number;
   status: PostStatus;
+  // BOIA
+  boia_candidate_id?: string | null;
+  boia_relevance_score?: number | null;
+  organism?: string | null;
+  category?: string | null;
+  // LinkedIn
   linkedin_urn?: string | null;
   linkedin_post_id?: string | null;
+  linkedin_publish_score?: number | null;
+  // Copy
   post_text?: string | null;
   copy_text?: string | null;
+  copy_quality_score?: number | null;
+  // Error
   error_message?: string | null;
   failure_reason?: FailureReason | null;
-  score_breakdown?: string | null;   // JSON serializado
-  copy_quality_score?: number | null;
+  score_breakdown?: string | null;
+  // Timestamps
   created_at?: string;
   published_at?: string | null;
   published_at_real?: string | null;
@@ -173,39 +182,46 @@ export function savePost(record: Omit<PostRecord, "id" | "created_at">): number 
   const database = getDb();
   const isPublished = record.status === "published";
 
-  const stmt = database.prepare(`
-    INSERT INTO posts (
-      content_hash, title, source_url, score, status,
-      linkedin_urn, linkedin_post_id, post_text, copy_text,
-      error_message, failure_reason, score_breakdown,
-      copy_quality_score, published_at, published_at_real
-    ) VALUES (
-      @content_hash, @title, @source_url, @score, @status,
-      @linkedin_urn, @linkedin_post_id, @post_text, @copy_text,
-      @error_message, @failure_reason, @score_breakdown,
-      @copy_quality_score,
-      @published_at,
-      @published_at_real
-    )
-  `);
-
-  const result = stmt.run({
-    content_hash: record.content_hash,
-    title: record.title,
-    source_url: record.source_url,
-    score: record.score,
-    status: record.status,
-    linkedin_urn: record.linkedin_urn ?? null,
-    linkedin_post_id: record.linkedin_post_id ?? null,
-    post_text: record.post_text ?? record.copy_text ?? null,
-    copy_text: record.copy_text ?? record.post_text ?? null,
-    error_message: record.error_message ?? null,
-    failure_reason: record.failure_reason ?? null,
-    score_breakdown: record.score_breakdown ?? null,
-    copy_quality_score: record.copy_quality_score ?? null,
-    published_at: isPublished ? new Date().toISOString() : null,
-    published_at_real: record.published_at_real ?? null,
-  });
+  const result = database
+    .prepare(`
+      INSERT INTO posts (
+        content_hash, title, source_url, score, status,
+        boia_candidate_id, boia_relevance_score, organism, category,
+        linkedin_urn, linkedin_post_id, linkedin_publish_score,
+        post_text, copy_text, copy_quality_score,
+        error_message, failure_reason, score_breakdown,
+        published_at, published_at_real
+      ) VALUES (
+        @content_hash, @title, @source_url, @score, @status,
+        @boia_candidate_id, @boia_relevance_score, @organism, @category,
+        @linkedin_urn, @linkedin_post_id, @linkedin_publish_score,
+        @post_text, @copy_text, @copy_quality_score,
+        @error_message, @failure_reason, @score_breakdown,
+        @published_at, @published_at_real
+      )
+    `)
+    .run({
+      content_hash: record.content_hash,
+      title: record.title,
+      source_url: record.source_url,
+      score: record.score,
+      status: record.status,
+      boia_candidate_id: record.boia_candidate_id ?? null,
+      boia_relevance_score: record.boia_relevance_score ?? null,
+      organism: record.organism ?? null,
+      category: record.category ?? null,
+      linkedin_urn: record.linkedin_urn ?? null,
+      linkedin_post_id: record.linkedin_post_id ?? null,
+      linkedin_publish_score: record.linkedin_publish_score ?? null,
+      post_text: record.post_text ?? record.copy_text ?? null,
+      copy_text: record.copy_text ?? record.post_text ?? null,
+      copy_quality_score: record.copy_quality_score ?? null,
+      error_message: record.error_message ?? null,
+      failure_reason: record.failure_reason ?? null,
+      score_breakdown: record.score_breakdown ?? null,
+      published_at: isPublished ? new Date().toISOString() : null,
+      published_at_real: record.published_at_real ?? null,
+    });
 
   return result.lastInsertRowid as number;
 }
@@ -221,16 +237,15 @@ export function updatePostStatus(
   const database = getDb();
   database
     .prepare(`
-      UPDATE posts
-      SET
-        status            = @status,
-        linkedin_urn      = COALESCE(@linkedin_urn, linkedin_urn),
-        linkedin_post_id  = COALESCE(@linkedin_post_id, linkedin_post_id),
-        error_message     = COALESCE(@error_message, error_message),
-        failure_reason    = COALESCE(@failure_reason, failure_reason),
-        published_at      = CASE WHEN @status = 'published' THEN datetime('now') ELSE published_at END,
-        published_at_real = COALESCE(@published_at_real, published_at_real)
-      WHERE content_hash  = @content_hash
+      UPDATE posts SET
+        status           = @status,
+        linkedin_urn     = COALESCE(@linkedin_urn, linkedin_urn),
+        linkedin_post_id = COALESCE(@linkedin_post_id, linkedin_post_id),
+        error_message    = COALESCE(@error_message, error_message),
+        failure_reason   = COALESCE(@failure_reason, failure_reason),
+        published_at     = CASE WHEN @status = 'published' THEN datetime('now') ELSE published_at END,
+        published_at_real= COALESCE(@published_at_real, published_at_real)
+      WHERE content_hash = @content_hash
     `)
     .run({
       status,
@@ -258,8 +273,22 @@ export function getRecentPosts(limit = 20, status?: PostStatus): PostRecord[] {
 export function getPendingApprovalPosts(): PostRecord[] {
   const database = getDb();
   return database
-    .prepare("SELECT * FROM posts WHERE status = 'pending_approval' ORDER BY score DESC")
+    .prepare("SELECT * FROM posts WHERE status = 'pending_approval' ORDER BY linkedin_publish_score DESC NULLS LAST")
     .all() as PostRecord[];
+}
+
+/** Retorna los organismos publicados en los últimos N minutos */
+export function getRecentOrganisms(minutesBack = 60 * 24): string[] {
+  const database = getDb();
+  const rows = database
+    .prepare(`
+      SELECT DISTINCT organism FROM posts
+      WHERE status = 'published'
+        AND organism IS NOT NULL
+        AND published_at >= datetime('now', '-${minutesBack} minutes')
+    `)
+    .all() as { organism: string }[];
+  return rows.map((r) => r.organism.toLowerCase());
 }
 
 // ─── Tokens ───────────────────────────────────────────────────────────────────
@@ -295,15 +324,12 @@ export function getStoredToken(): TokenRecord | null {
   return row ?? null;
 }
 
-// ─── Lock de ejecución concurrente ────────────────────────────────────────────
+// ─── Lock ─────────────────────────────────────────────────────────────────────
 
 const LOCK_NAME = "publish_job";
 
 export function acquireLock(): boolean {
   const database = getDb();
-  const maxAgeMs = config.lockMaxAgeMinutes * 60 * 1000;
-
-  // Limpiar locks viejos (stale locks por proceso caído)
   database
     .prepare(
       `DELETE FROM locks WHERE name = ? AND started_at < datetime('now', '-${config.lockMaxAgeMinutes} minutes')`
@@ -311,14 +337,13 @@ export function acquireLock(): boolean {
     .run(LOCK_NAME);
 
   const existing = database
-    .prepare("SELECT * FROM locks WHERE name = ?")
+    .prepare("SELECT pid, started_at FROM locks WHERE name = ?")
     .get(LOCK_NAME) as { pid: number; started_at: string } | undefined;
 
   if (existing) {
-    const ageMs = Date.now() - new Date(existing.started_at).getTime();
-    logger.warn("Lock de ejecución activo, abortando", {
+    logger.warn("Lock activo, abortando", {
       pid: existing.pid,
-      ageMinutes: Math.round(ageMs / 60000),
+      ageMinutes: Math.round((Date.now() - new Date(existing.started_at).getTime()) / 60000),
     });
     return false;
   }
@@ -329,7 +354,6 @@ export function acquireLock(): boolean {
       .run(LOCK_NAME, process.pid);
     return true;
   } catch {
-    // Condición de carrera: otro proceso ganó el lock
     return false;
   }
 }

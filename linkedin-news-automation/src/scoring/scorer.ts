@@ -57,13 +57,22 @@ export interface ScoredNewsItem extends IngestedNewsItem {
 
 // ─── Scorer público ───────────────────────────────────────────────────────────
 
+// Default weights (kept for backward compatibility; BOIA pipeline uses editorialScorer)
+const DEFAULT_WEIGHTS = {
+  recency: 30,
+  tags: 30,
+  source: 20,
+  length: 10,
+  bonus: 5,
+};
+
 export function scoreItem(item: IngestedNewsItem): ScoredNewsItem {
   const weights = {
-    recency: config.scoreWeightRecency,
-    tags: config.scoreWeightTags,
-    source: config.scoreWeightSource,
-    length: config.scoreWeightLength,
-    bonus: config.scoreWeightBonus,
+    recency: (config as Record<string, unknown>).scoreWeightRecency as number ?? DEFAULT_WEIGHTS.recency,
+    tags: (config as Record<string, unknown>).scoreWeightTags as number ?? DEFAULT_WEIGHTS.tags,
+    source: (config as Record<string, unknown>).scoreWeightSource as number ?? DEFAULT_WEIGHTS.source,
+    length: (config as Record<string, unknown>).scoreWeightLength as number ?? DEFAULT_WEIGHTS.length,
+    bonus: (config as Record<string, unknown>).scoreWeightBonus as number ?? DEFAULT_WEIGHTS.bonus,
     penaltyMax: config.scorePenaltyMaxPoints,
   };
 

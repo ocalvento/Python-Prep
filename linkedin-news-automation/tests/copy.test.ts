@@ -1,7 +1,6 @@
 import { generatePost } from "../src/copy/generator";
-import { ScoredNewsItem } from "../src/scoring/scorer";
+import { ScoredBoiaCandidate } from "../src/scoring/editorialScorer";
 
-// Jest hoist jest.mock() antes de los const — la config debe ir inline o via module variable
 jest.mock("../src/config", () => ({
   config: {
     maxPostChars: 3000,
@@ -9,6 +8,7 @@ jest.mock("../src/config", () => ({
     copyMinChars: 200,
     copyPhraseOverlapThreshold: 0.55,
     recentPostsToCheck: 10,
+    scorePenaltyMaxPoints: 15,
     logLevel: "error",
     logDir: "/tmp",
   },
@@ -17,34 +17,43 @@ jest.mock("../src/config/logger", () => ({
   logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
 }));
 
-// Referencia mutable al config mockeado para tests que necesiten modificarlo
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const MOCK_CONFIG = require("../src/config").config as Record<string, unknown>;
 
-function makeScoredItem(overrides: Partial<ScoredNewsItem> = {}): ScoredNewsItem {
+function makeScoredCandidate(overrides: Partial<ScoredBoiaCandidate> = {}): ScoredBoiaCandidate {
   return {
-    title: "OpenAI lanza GPT-5 con capacidades avanzadas de razonamiento multi-paso",
+    id: "boia-test-001",
+    title: "BCRA establece nuevos requisitos de liquidez para PSP",
     summary:
-      "OpenAI presentó GPT-5, su modelo más avanzado. Según la empresa, supera a su predecesor " +
-      "en un 40% en benchmarks de razonamiento matemático y reduce las alucinaciones en un 60%. " +
-      "El modelo está disponible para desarrolladores a través de la API.",
-    url: "https://example.com/gpt5",
-    source: "TechCrunch",
-    published_at: "2026-03-24T14:30:00Z",
-    tags: ["ia", "machine learning", "innovación"],
-    contentHash: "deadbeef1234567890abcdef" + "0".repeat(40),
-    ageHours: 4,
-    normalizedUrl: "https://example.com/gpt5",
-    score: 88,
+      "El Banco Central publicó la Comunicación A 8123 estableciendo que los PSP deberán " +
+      "mantener encajes mínimos del 30% sobre el saldo de fondos de clientes. " +
+      "La norma entra en vigencia el 1 de julio de 2026 y aplica a todos los PSP autorizados.",
+    sourceUrl: "https://bcra.gob.ar/test",
+    publishedAt: new Date().toISOString(),
+    organism: "BCRA",
+    category: "regulacion_financiera",
+    tags: ["psp", "liquidez", "regulacion", "fintech"],
+    boiaRelevanceScore: 85,
+    whyItMatters:
+      "Los 180 PSP habilitados deberán revisar su estructura de capital antes del 1 de julio. " +
+      "Para muchos, el 30% de encaje implica inmovilizar capital. Las fintechs deberán " +
+      "adaptar su modelo operativo con impacto directo en la tesorería.",
+    affectedAudience: ["fintechs", "psp", "compliance", "bancos"],
+    linkedinAngle:
+      "Las reglas de liquidez para PSP se endurecen: el BCRA exige encajes del 30% desde julio.",
+    contentHash: "a".repeat(64),
+    ageHours: 6,
+    normalizedSourceUrl: "https://bcra.gob.ar/test",
+    linkedinPublishScore: 82,
     scoreBreakdown: {
-      recency: 28,
-      tagRelevance: 28,
-      sourceCredibility: 12,
-      contentLength: 10,
-      bonus: 10,
-      penalty: 0,
-      matchedHighTags: ["ia", "machine learning"],
-      matchedMediumTags: [],
+      organismRelevance: 25,
+      audienceImpact: 22,
+      messageClarity: 12,
+      recency: 13,
+      conversationPotential: 9,
+      dataBonus: 8,
+      technicalityPenalty: 0,
+      matchedAudience: ["fintechs", "psp", "compliance", "bancos"],
     },
     ...overrides,
   };
@@ -52,30 +61,30 @@ function makeScoredItem(overrides: Partial<ScoredNewsItem> = {}): ScoredNewsItem
 
 describe("copy/generator", () => {
   describe("generatePost — happy path", () => {
-    it("debe retornar { ok: true } para un ítem válido", () => {
-      const result = generatePost(makeScoredItem());
+    it("debe retornar { ok: true } para un candidato BOIA válido", () => {
+      const result = generatePost(makeScoredCandidate());
       expect(result.ok).toBe(true);
     });
 
     it("debe incluir el título en el texto", () => {
-      const item = makeScoredItem();
-      const result = generatePost(item);
+      const candidate = makeScoredCandidate();
+      const result = generatePost(candidate);
       expect(result.ok).toBe(true);
-      if (result.ok) expect(result.post.text).toContain(item.title);
+      if (result.ok) expect(result.post.text).toContain(candidate.title);
     });
 
     it("no debe superar maxPostChars", () => {
-      const result = generatePost(makeScoredItem());
+      const result = generatePost(makeScoredCandidate());
       if (result.ok) expect(result.post.charCount).toBeLessThanOrEqual(3000);
     });
 
     it("charCount debe ser igual a text.length", () => {
-      const result = generatePost(makeScoredItem());
+      const result = generatePost(makeScoredCandidate());
       if (result.ok) expect(result.post.charCount).toBe(result.post.text.length);
     });
 
     it("debe incluir hashtags con #", () => {
-      const result = generatePost(makeScoredItem());
+      const result = generatePost(makeScoredCandidate());
       if (result.ok) {
         expect(result.post.hashtags.length).toBeGreaterThan(0);
         expect(result.post.hashtags.every((h) => h.startsWith("#"))).toBe(true);
@@ -83,16 +92,18 @@ describe("copy/generator", () => {
     });
 
     it("no debe incluir más de maxHashtags hashtags", () => {
-      const item = makeScoredItem({
-        tags: ["ia", "startup", "tecnología", "liderazgo", "fintech", "cloud"],
+      const candidate = makeScoredCandidate({
+        tags: ["psp", "liquidez", "regulacion", "fintech", "bancos", "crypto"],
       });
-      const result = generatePost(item);
+      const result = generatePost(candidate);
       if (result.ok) expect(result.post.hashtags.length).toBeLessThanOrEqual(4);
     });
 
     it("hashtags deben ser solo letras y números (sin acentos)", () => {
-      const item = makeScoredItem({ tags: ["inteligencia artificial", "tecnología", "innovación"] });
-      const result = generatePost(item);
+      const candidate = makeScoredCandidate({
+        tags: ["regulación", "protección", "tecnología"],
+      });
+      const result = generatePost(candidate);
       if (result.ok) {
         result.post.hashtags.forEach((h) => {
           expect(h).toMatch(/^#[a-z0-9]+$/);
@@ -101,84 +112,80 @@ describe("copy/generator", () => {
     });
 
     it("debe incluir un quality score > 0", () => {
-      const result = generatePost(makeScoredItem());
+      const result = generatePost(makeScoredCandidate());
       if (result.ok) expect(result.post.qualityScore).toBeGreaterThan(0);
     });
   });
 
   describe("generatePost — validación de calidad", () => {
     it("debe retornar { ok: false } si el copy resultante es muy corto", () => {
-      // Item con título y resumen mínimos que producirán un copy corto
-      const item = makeScoredItem({
-        title: "Noticia corta de tecnología digital",
-        summary: "Resumen muy breve con pocas palabras pero que cumple el mínimo requerido.",
-        tags: [],
-        scoreBreakdown: {
-          recency: 5,
-          tagRelevance: 0,
-          sourceCredibility: 5,
-          contentLength: 3,
-          bonus: 0,
-          penalty: 5,
-          matchedHighTags: [],
-          matchedMediumTags: [],
-        },
-      });
-      // Forzar config.copyMinChars alto para este test
       const originalMin = MOCK_CONFIG.copyMinChars;
-      (MOCK_CONFIG as Record<string, unknown>).copyMinChars = 99999;
-      const result = generatePost(item);
+      MOCK_CONFIG.copyMinChars = 99999;
+      const result = generatePost(makeScoredCandidate());
       expect(result.ok).toBe(false);
-      (MOCK_CONFIG as Record<string, unknown>).copyMinChars = originalMin;
+      MOCK_CONFIG.copyMinChars = originalMin;
     });
 
     it("debe retornar { ok: false } si el overlap con posts recientes es muy alto", () => {
-      const item = makeScoredItem();
-      // Simular que el post reciente es prácticamente el mismo texto
-      const firstResult = generatePost(item);
-      if (!firstResult.ok) return; // skip si el primero falla
+      const candidate = makeScoredCandidate();
+      const firstResult = generatePost(candidate);
+      if (!firstResult.ok) return;
       const recentTexts = [firstResult.post.text];
 
-      // Intentar con el mismo ítem pero umbral de overlap muy bajo
       const originalThreshold = MOCK_CONFIG.copyPhraseOverlapThreshold;
-      (MOCK_CONFIG as Record<string, unknown>).copyPhraseOverlapThreshold = 0.001;
-      const result = generatePost(item, recentTexts);
+      MOCK_CONFIG.copyPhraseOverlapThreshold = 0.001;
+      const result = generatePost(candidate, recentTexts);
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.reason).toContain("Overlap");
-      (MOCK_CONFIG as Record<string, unknown>).copyPhraseOverlapThreshold = originalThreshold;
+      MOCK_CONFIG.copyPhraseOverlapThreshold = originalThreshold;
     });
   });
 
-  describe("generatePost — reflexiones y variedad", () => {
-    it("debe incluir una reflexión para noticias de IA", () => {
-      const item = makeScoredItem({ tags: ["ia", "machine learning"] });
-      const result = generatePost(item);
+  describe("generatePost — contenido regulatorio", () => {
+    it("debe mencionar el organismo en el texto", () => {
+      const candidate = makeScoredCandidate({ linkedinAngle: undefined });
+      const result = generatePost(candidate);
       if (result.ok) {
-        // Verificar que hay al menos 2 párrafos (el cuerpo + algo más)
+        expect(result.post.text.toLowerCase()).toContain("bcra");
+      }
+    });
+
+    it("debe incluir estructura de párrafos (hook + cuerpo + CTA)", () => {
+      const result = generatePost(makeScoredCandidate());
+      if (result.ok) {
         expect(result.post.text).toContain("\n\n");
       }
     });
 
-    it("dos ítems distintos con el mismo tema deben poder tener reflexiones distintas", () => {
-      const item1 = makeScoredItem({ contentHash: "hash1" + "0".repeat(59) });
-      const item2 = makeScoredItem({ contentHash: "hash2" + "0".repeat(59) });
-      // Con posts recientes que ya usan una reflexión, la segunda debería elegir otra
-      const result1 = generatePost(item1, []);
-      if (!result1.ok) return;
+    it("linkedinAngle provisto debe usarse como base del cuerpo", () => {
+      const withAngle = makeScoredCandidate({
+        linkedinAngle: "Texto editorial exclusivo para PSP que cambia el modelo operativo.",
+      });
+      const withoutAngle = makeScoredCandidate({ linkedinAngle: undefined });
+      const r1 = generatePost(withAngle);
+      const r2 = generatePost(withoutAngle);
+      // Ambos deberían pasar, pero el body debe ser distinto
+      if (r1.ok && r2.ok) {
+        expect(r1.post.text).not.toBe(r2.post.text);
+      }
+    });
 
-      // El resultado depende del overlap — si hay variantes disponibles, se elige la menos repetida
-      const result2 = generatePost(item2, [result1.post.text]);
-      // Solo verificamos que funciona sin errores — el overlap real depende del contenido
-      expect(typeof result2.ok).toBe("boolean");
+    it("no debe copiar el summary verbatim", () => {
+      const candidate = makeScoredCandidate();
+      const result = generatePost(candidate);
+      if (result.ok) {
+        const summaryStart = candidate.summary.substring(0, 50).toLowerCase();
+        expect(result.post.text.toLowerCase()).not.toContain(summaryStart);
+      }
     });
   });
 
   describe("generatePost — truncado", () => {
-    it("no debe superar maxPostChars incluso con resumen muy largo", () => {
-      const item = makeScoredItem({
-        summary: "Este es un resumen extremadamente largo. ".repeat(100),
+    it("no debe superar maxPostChars incluso con whyItMatters muy largo", () => {
+      const candidate = makeScoredCandidate({
+        whyItMatters: "Esta norma impacta directamente en los procesos operativos. ".repeat(50),
       });
-      const result = generatePost(item);
+      const result = generatePost(candidate);
       if (result.ok) {
         expect(result.post.charCount).toBeLessThanOrEqual(3000);
         expect(result.post.text.length).toBe(result.post.charCount);
