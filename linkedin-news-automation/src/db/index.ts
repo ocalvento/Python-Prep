@@ -4,7 +4,7 @@ import * as path from "path";
 import { config } from "../config";
 import { logger } from "../config/logger";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 let db: Database.Database | null = null;
 
@@ -67,6 +67,26 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE posts ADD COLUMN category           TEXT;
     CREATE INDEX IF NOT EXISTS idx_posts_organism ON posts(organism);
     CREATE INDEX IF NOT EXISTS idx_posts_boia_id  ON posts(boia_candidate_id);
+  `,
+  4: `
+    CREATE TABLE IF NOT EXISTS post_performance (
+      id              TEXT     PRIMARY KEY,
+      candidate_id    TEXT     NOT NULL,
+      title           TEXT     NOT NULL,
+      source_url      TEXT     NOT NULL,
+      editorial_score INTEGER  NOT NULL,
+      published_at    DATETIME NOT NULL,
+      impressions     INTEGER  NOT NULL DEFAULT 0,
+      likes           INTEGER  NOT NULL DEFAULT 0,
+      comments        INTEGER  NOT NULL DEFAULT 0,
+      saves           INTEGER,
+      engagement_rate REAL     NOT NULL DEFAULT 0,
+      created_at      DATETIME DEFAULT (datetime('now')),
+      updated_at      DATETIME DEFAULT (datetime('now'))
+    );
+    CREATE INDEX IF NOT EXISTS idx_perf_candidate ON post_performance(candidate_id);
+    CREATE INDEX IF NOT EXISTS idx_perf_source    ON post_performance(source_url);
+    CREATE INDEX IF NOT EXISTS idx_perf_eng_rate  ON post_performance(engagement_rate);
   `,
 };
 

@@ -12,6 +12,7 @@ import {
   closeDb,
   FailureReason,
 } from "../db";
+import { createPostPerformance } from "../performance/performanceService";
 import { config } from "../config";
 import { logger } from "../config/logger";
 
@@ -237,6 +238,13 @@ async function runPipeline(result: PublishResult): Promise<PublishResult> {
         score_breakdown: JSON.stringify(candidate.scoreBreakdown),
         published_at_real: new Date().toISOString(),
       });
+
+      createPostPerformance(
+        candidate.id,
+        candidate.title,
+        candidate.normalizedSourceUrl,
+        candidate.linkedinPublishScore
+      );
 
       logger.info("Publicado exitosamente", { ...logCtx, postUrn, postId });
       result.published++;

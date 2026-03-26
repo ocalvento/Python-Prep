@@ -10,6 +10,7 @@
     "publish-now": "ts-node src/jobs/publish.ts",
     "schedule": "ts-node src/jobs/scheduler.ts",
     "get-token": "ts-node scripts/getToken.ts",
+    "update-metrics": "ts-node scripts/updateMetrics.ts",
     "test": "jest --coverage",
     "lint": "eslint src/**/*.ts"
   },
