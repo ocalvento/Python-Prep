@@ -4,7 +4,7 @@ import * as path from "path";
 import { config } from "../config";
 import { logger } from "../config/logger";
 
-const SCHEMA_VERSION = 4;
+const SCHEMA_VERSION = 5;
 
 let db: Database.Database | null = null;
 
@@ -67,6 +67,11 @@ const MIGRATIONS: Record<number, string> = {
     ALTER TABLE posts ADD COLUMN category           TEXT;
     CREATE INDEX IF NOT EXISTS idx_posts_organism ON posts(organism);
     CREATE INDEX IF NOT EXISTS idx_posts_boia_id  ON posts(boia_candidate_id);
+  `,
+  5: `
+    ALTER TABLE posts ADD COLUMN linkedin_urn   TEXT;
+    ALTER TABLE posts ADD COLUMN post_text      TEXT;
+    ALTER TABLE posts ADD COLUMN error_message  TEXT;
   `,
   4: `
     CREATE TABLE IF NOT EXISTS post_performance (
