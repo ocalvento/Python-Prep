@@ -53,7 +53,7 @@ function createHttpClient(accessToken: string): AxiosInstance {
       Authorization: `Bearer ${maskToken(accessToken)}`,
       "Content-Type": "application/json",
       "X-Restli-Protocol-Version": "2.0.0",
-      "LinkedIn-Version": "202406",
+      "LinkedIn-Version": "202501",
     },
     timeout: 15_000,
   });
